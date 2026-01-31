@@ -238,6 +238,45 @@ def _extract_text_from_adf(node: dict | list, depth: int = 0) -> str:
     return inner
 
 
+def _get_table_nodes(adf: dict) -> list[dict]:
+    """Find all table nodes in the ADF tree."""
+    tables = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "table":
+                tables.append(node)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(adf)
+    return tables
+
+
+def _build_table_cell(value: str, cell_type: str = "tableCell") -> dict:
+    """Build a single ADF table cell with a text paragraph."""
+    return {
+        "type": cell_type,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": value}] if value else [],
+            }
+        ],
+    }
+
+
+def _build_table_row(values: list[str], cell_type: str = "tableCell") -> dict:
+    """Build an ADF tableRow from a list of string values."""
+    return {
+        "type": "tableRow",
+        "content": [_build_table_cell(v, cell_type) for v in values],
+    }
+
+
 @mcp.tool()
 async def confluence_get_page(page_id: str) -> CallToolResult:
     """Fetch a Confluence page and cache it locally for editing.
@@ -836,6 +875,272 @@ async def confluence_extract_text(
 
     title = data.get("title", "?")
     return _text(f"# {title}\n\n{text.strip()}")
+
+
+@mcp.tool()
+async def confluence_update_task(
+    page_id: str,
+    task_text: str,
+    state: str,
+) -> CallToolResult:
+    """Toggle a task (checkbox) item on a Confluence page.
+
+    Finds a taskItem whose text contains task_text and sets its state.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        task_text: Text substring to match the task item (e.g. "Review PR").
+        state: New state — "DONE" or "TODO".
+    """
+    state = state.upper()
+    if state not in ("DONE", "TODO"):
+        return _text(f"Invalid state \"{state}\". Use \"DONE\" or \"TODO\".")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+        adf = _parse_adf(data)
+
+        count = 0
+
+        def _update_tasks(node):
+            nonlocal count
+            if isinstance(node, dict):
+                if node.get("type") == "taskItem" and "attrs" in node:
+                    text = _extract_text_from_adf(node).strip()
+                    if task_text.lower() in text.lower():
+                        node["attrs"]["state"] = state
+                        count += 1
+                for v in node.values():
+                    _update_tasks(v)
+            elif isinstance(node, list):
+                for item in node:
+                    _update_tasks(item)
+
+        _update_tasks(adf)
+
+        if count == 0:
+            return _text(f"No task found matching \"{task_text}\".")
+
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            f"Set task '{task_text}' to {state}",
+        )
+
+    _cache_after_push(result, adf, data.get("spaceId"))
+
+    return _text(f"Updated {count} task(s) matching \"{task_text}\" to {state} (v{result['version']['number']}).")
+
+
+@mcp.tool()
+async def confluence_regex_replace(
+    page_id: str,
+    pattern: str,
+    replacement: str,
+    version_message: str = "",
+) -> CallToolResult:
+    """Find and replace text using a regex pattern on a Confluence page.
+
+    Applies re.sub() to every text node in the ADF. Supports capture groups
+    in the replacement string (e.g. r"\\1").
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        pattern: Python regex pattern to match.
+        replacement: Replacement string (supports backreferences like \\1).
+        version_message: Optional message describing the change.
+    """
+    try:
+        compiled = re.compile(pattern)
+    except re.error as e:
+        return _text(f"Invalid regex: {e}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+        adf = _parse_adf(data)
+
+        count = 0
+
+        def _regex_replace(node):
+            nonlocal count
+            if isinstance(node, dict):
+                if node.get("type") == "text" and "text" in node:
+                    new_text, n = compiled.subn(replacement, node["text"])
+                    if n > 0:
+                        node["text"] = new_text
+                        count += n
+                for v in node.values():
+                    _regex_replace(v)
+            elif isinstance(node, list):
+                for item in node:
+                    _regex_replace(item)
+
+        _regex_replace(adf)
+
+        if count == 0:
+            return _text(f"No matches for pattern: {pattern}")
+
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            version_message or f"Regex replace: {pattern}",
+        )
+
+    _cache_after_push(result, adf, data.get("spaceId"))
+
+    return _text(f"Replaced {count} match(es) of /{pattern}/ in \"{result['title']}\" (v{result['version']['number']}).")
+
+
+@mcp.tool()
+async def confluence_update_table_cell(
+    page_id: str,
+    row: int,
+    col: int,
+    value: str,
+    table_index: int = 0,
+) -> CallToolResult:
+    """Update a single cell in a table on a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        row: Zero-based row index.
+        col: Zero-based column index.
+        value: New text value for the cell.
+        table_index: Which table on the page (0-based, default first table).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+        adf = _parse_adf(data)
+
+        tables = _get_table_nodes(adf)
+        if not tables:
+            return _text("No tables found on this page.")
+        if table_index >= len(tables):
+            return _text(f"Table index {table_index} out of range (page has {len(tables)} table(s)).")
+
+        table = tables[table_index]
+        rows = table.get("content", [])
+        if row >= len(rows):
+            return _text(f"Row {row} out of range (table has {len(rows)} row(s)).")
+
+        cells = rows[row].get("content", [])
+        if col >= len(cells):
+            return _text(f"Column {col} out of range (row has {len(cells)} column(s)).")
+
+        cell = cells[col]
+        cell_type = cell.get("type", "tableCell")
+        # Replace cell content with new value
+        cell["content"] = [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": value}] if value else [],
+            }
+        ]
+
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            f"Updated table cell [{row},{col}]",
+        )
+
+    _cache_after_push(result, adf, data.get("spaceId"))
+
+    return _text(f"Updated cell [{row},{col}] to \"{value}\" (v{result['version']['number']}).")
+
+
+@mcp.tool()
+async def confluence_insert_table_row(
+    page_id: str,
+    row_index: int,
+    values: list[str],
+    table_index: int = 0,
+) -> CallToolResult:
+    """Insert a new row into a table on a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        row_index: Position to insert at (0-based). Use -1 to append at the end.
+        values: List of cell values for the new row.
+        table_index: Which table on the page (0-based, default first table).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+        adf = _parse_adf(data)
+
+        tables = _get_table_nodes(adf)
+        if not tables:
+            return _text("No tables found on this page.")
+        if table_index >= len(tables):
+            return _text(f"Table index {table_index} out of range (page has {len(tables)} table(s)).")
+
+        table = tables[table_index]
+        rows = table.get("content", [])
+
+        new_row = _build_table_row(values)
+
+        if row_index == -1 or row_index >= len(rows):
+            rows.append(new_row)
+            pos = len(rows) - 1
+        else:
+            rows.insert(row_index, new_row)
+            pos = row_index
+
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            f"Inserted table row at index {pos}",
+        )
+
+    _cache_after_push(result, adf, data.get("spaceId"))
+
+    return _text(f"Inserted row at index {pos} with {len(values)} cell(s) (v{result['version']['number']}).")
+
+
+@mcp.tool()
+async def confluence_delete_table_row(
+    page_id: str,
+    row_index: int,
+    table_index: int = 0,
+) -> CallToolResult:
+    """Delete a row from a table on a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        row_index: Zero-based row index to delete.
+        table_index: Which table on the page (0-based, default first table).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+        adf = _parse_adf(data)
+
+        tables = _get_table_nodes(adf)
+        if not tables:
+            return _text("No tables found on this page.")
+        if table_index >= len(tables):
+            return _text(f"Table index {table_index} out of range (page has {len(tables)} table(s)).")
+
+        table = tables[table_index]
+        rows = table.get("content", [])
+        if row_index >= len(rows):
+            return _text(f"Row {row_index} out of range (table has {len(rows)} row(s)).")
+
+        deleted = rows.pop(row_index)
+        deleted_text = _extract_text_from_adf(deleted).strip()
+
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            f"Deleted table row {row_index}",
+        )
+
+    _cache_after_push(result, adf, data.get("spaceId"))
+
+    return _text(f"Deleted row {row_index} (\"{deleted_text[:60]}\") (v{result['version']['number']}).")
 
 
 @mcp.tool()
