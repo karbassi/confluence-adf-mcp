@@ -394,6 +394,58 @@ class TestListAttachments:
 # confluence_get_contributors
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# confluence_list_spaces
+# ---------------------------------------------------------------------------
+
+class TestListSpaces:
+    @respx.mock
+    async def test_spaces_listed(self):
+        respx.get(f"{BASE}/api/v2/spaces").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "1", "name": "Engineering", "key": "ENG", "type": "global"},
+                {"id": "2", "name": "Personal", "key": "~user", "type": "personal"},
+            ]})
+        )
+        result = await server.confluence_list_spaces()
+        text = result.content[0].text
+        assert "2 space(s)" in text
+        assert "Engineering" in text
+        assert "key=ENG" in text
+
+    @respx.mock
+    async def test_no_spaces(self):
+        respx.get(f"{BASE}/api/v2/spaces").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await server.confluence_list_spaces()
+        assert "No spaces found" in result.content[0].text
+
+    @respx.mock
+    async def test_type_filter(self):
+        respx.get(f"{BASE}/api/v2/spaces").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "1", "name": "Eng", "key": "ENG", "type": "global"},
+            ]})
+        )
+        await server.confluence_list_spaces(type="global")
+        req = respx.calls[0].request
+        assert "type=global" in str(req.url)
+
+    @respx.mock
+    async def test_limit_cap(self):
+        respx.get(f"{BASE}/api/v2/spaces").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        await server.confluence_list_spaces(limit=999)
+        req = respx.calls[0].request
+        assert "limit=250" in str(req.url)
+
+
+# ---------------------------------------------------------------------------
+# confluence_get_contributors
+# ---------------------------------------------------------------------------
+
 class TestGetContributors:
     @respx.mock
     async def test_unique_authors(self):

@@ -738,3 +738,155 @@ class TestRemoveLabel:
         )
         result = await server.confluence_remove_label("1", "missing")
         assert "was not on this page" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# confluence_archive_page
+# ---------------------------------------------------------------------------
+
+class TestArchivePage:
+    @respx.mock
+    async def test_preview_without_confirm(self):
+        page = make_page_response()
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        result = await server.confluence_archive_page("12345")
+        text = result.content[0].text
+        assert "ARCHIVE PREVIEW" in text
+        assert "Test Page" in text
+        assert "id=12345" in text
+        assert "confirm=True" in text
+        # No PUT should have been made
+        put_calls = [c for c in respx.calls if c.request.method == "PUT"]
+        assert len(put_calls) == 0
+
+    @respx.mock
+    async def test_confirm_archives(self):
+        page = make_page_response()
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        respx.put(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=_push_result())
+        )
+        result = await server.confluence_archive_page("12345", confirm=True)
+        text = result.content[0].text
+        assert "Archived" in text
+        assert "Test Page" in text
+        # Verify the PUT payload has status=archived
+        put_calls = [c for c in respx.calls if c.request.method == "PUT"]
+        assert len(put_calls) == 1
+        body = json.loads(put_calls[0].request.content)
+        assert body["status"] == "archived"
+
+    @respx.mock
+    async def test_preview_shows_space(self):
+        page = make_page_response(space_id="TEAM")
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        result = await server.confluence_archive_page("12345")
+        assert "TEAM" in result.content[0].text
+
+    @respx.mock
+    async def test_http_error_on_confirm(self):
+        page = make_page_response()
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        respx.put(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(403)
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await server.confluence_archive_page("12345", confirm=True)
+
+
+# ---------------------------------------------------------------------------
+# confluence_move_page
+# ---------------------------------------------------------------------------
+
+class TestMovePage:
+    @respx.mock
+    async def test_preview_without_confirm(self):
+        src = make_page_response(page_id="10", title="Source Page", space_id="SP1")
+        tgt = make_page_response(page_id="20", title="Target Parent", space_id="SP1")
+        respx.get(f"{BASE}/api/v2/pages/10").mock(
+            return_value=httpx.Response(200, json=src)
+        )
+        respx.get(f"{BASE}/api/v2/pages/20").mock(
+            return_value=httpx.Response(200, json=tgt)
+        )
+        result = await server.confluence_move_page("10", "20")
+        text = result.content[0].text
+        assert "MOVE PREVIEW" in text
+        assert "Source Page" in text
+        assert "Target Parent" in text
+        assert "confirm=True" in text
+        # No PUT should have been made
+        put_calls = [c for c in respx.calls if c.request.method == "PUT"]
+        assert len(put_calls) == 0
+
+    @respx.mock
+    async def test_cross_space_warning(self):
+        src = make_page_response(page_id="10", title="Src", space_id="SP1")
+        tgt = make_page_response(page_id="20", title="Tgt", space_id="SP2")
+        respx.get(f"{BASE}/api/v2/pages/10").mock(
+            return_value=httpx.Response(200, json=src)
+        )
+        respx.get(f"{BASE}/api/v2/pages/20").mock(
+            return_value=httpx.Response(200, json=tgt)
+        )
+        result = await server.confluence_move_page("10", "20")
+        assert "CROSS-SPACE" in result.content[0].text
+
+    @respx.mock
+    async def test_confirm_moves(self):
+        src = make_page_response(page_id="10", title="Source", space_id="SP1")
+        tgt = make_page_response(page_id="20", title="Target", space_id="SP1")
+        respx.get(f"{BASE}/api/v2/pages/10").mock(
+            return_value=httpx.Response(200, json=src)
+        )
+        respx.get(f"{BASE}/api/v2/pages/20").mock(
+            return_value=httpx.Response(200, json=tgt)
+        )
+        # v2 PUT for push_page_update
+        respx.put(f"{BASE}/api/v2/pages/10").mock(
+            return_value=httpx.Response(200, json={"id": "10", "title": "Source", "version": {"number": 2}})
+        )
+        # v1 PUT for ancestor update
+        respx.put(f"{BASE}/rest/api/content/10").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        result = await server.confluence_move_page("10", "20", confirm=True)
+        text = result.content[0].text
+        assert "Moved" in text
+        assert "Source" in text
+        assert "Target" in text
+        # Verify v1 PUT sets ancestors
+        v1_puts = [c for c in respx.calls if "rest/api/content/10" in str(c.request.url) and c.request.method == "PUT"]
+        assert len(v1_puts) == 1
+        body = json.loads(v1_puts[0].request.content)
+        assert body["ancestors"] == [{"id": "20"}]
+
+    @respx.mock
+    async def test_cross_space_confirm_message(self):
+        src = make_page_response(page_id="10", title="Src", space_id="SP1")
+        tgt = make_page_response(page_id="20", title="Tgt", space_id="SP2")
+        respx.get(f"{BASE}/api/v2/pages/10").mock(
+            return_value=httpx.Response(200, json=src)
+        )
+        respx.get(f"{BASE}/api/v2/pages/20").mock(
+            return_value=httpx.Response(200, json=tgt)
+        )
+        respx.put(f"{BASE}/api/v2/pages/10").mock(
+            return_value=httpx.Response(200, json={"id": "10", "title": "Src", "version": {"number": 2}})
+        )
+        respx.put(f"{BASE}/rest/api/content/10").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        result = await server.confluence_move_page("10", "20", confirm=True)
+        text = result.content[0].text
+        assert "cross-space" in text
+        assert "SP1" in text
+        assert "SP2" in text

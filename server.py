@@ -1631,5 +1631,184 @@ async def confluence_revert_page(
     return _text(f"Reverted to v{version_number}. Now at v{result['number']} — \"{result.get('message', '')}\".")
 
 
+@mcp.tool()
+async def confluence_list_spaces(
+    limit: int = 25,
+    type: str = "",
+    status: str = "current",
+) -> CallToolResult:
+    """List Confluence spaces.
+
+    Args:
+        limit: Maximum number of spaces to return (default 25, max 250).
+        type: Filter by space type — "global" or "personal". Empty for all.
+        status: Filter by status — "current" (default) or "archived".
+    """
+    limit = min(limit, 250)
+    params: dict = {"limit": limit, "status": status}
+    if type:
+        params["type"] = type
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/spaces",
+            params=params,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    spaces = data.get("results", [])
+    if not spaces:
+        return _text("No spaces found.")
+
+    lines = [f"{len(spaces)} space(s):"]
+    for s in spaces:
+        sid = s.get("id", "?")
+        name = s.get("name", "?")
+        key = s.get("key", "?")
+        stype = s.get("type", "?")
+        lines.append(f"  [{sid}] \"{name}\" (key={key}, type={stype})")
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_archive_page(
+    page_id: str,
+    confirm: bool = False,
+) -> CallToolResult:
+    """Archive a Confluence page.
+
+    DESTRUCTIVE: This removes the page from active view. By default this tool
+    runs in preview mode — call with confirm=True to actually archive.
+
+    You MUST show the preview to the user and get their explicit approval before
+    calling again with confirm=True.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        confirm: Must be True to actually archive. False (default) shows a preview.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+
+        title = data["title"]
+        version = data["version"]["number"]
+        space_id = data.get("spaceId", "?")
+
+        if not confirm:
+            return _text(
+                f"⚠ ARCHIVE PREVIEW — This will archive the following page:\n"
+                f"  Page:    \"{title}\" (id={page_id})\n"
+                f"  Space:   {space_id}\n"
+                f"  Version: v{version}\n\n"
+                f"The page will be removed from active view but can be restored.\n"
+                f"To proceed, call again with confirm=True."
+            )
+
+        payload = {
+            "id": page_id,
+            "title": title,
+            "status": "archived",
+            "version": {"number": version + 1, "message": "Archived via MCP"},
+            "body": {
+                "representation": "atlas_doc_format",
+                "value": data["body"]["atlas_doc_format"]["value"],
+            },
+        }
+        resp = await client.put(
+            f"{BASE_URL}/api/v2/pages/{page_id}",
+            json=payload,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+
+    return _text(f"Archived \"{title}\" (id={page_id}).")
+
+
+@mcp.tool()
+async def confluence_move_page(
+    page_id: str,
+    target_parent_id: str,
+    confirm: bool = False,
+) -> CallToolResult:
+    """Move a Confluence page to a new parent.
+
+    DESTRUCTIVE: This changes the page's location in the content tree. By default
+    this tool runs in preview mode — call with confirm=True to actually move.
+
+    You MUST show the preview to the user and get their explicit approval before
+    calling again with confirm=True.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        target_parent_id: The page ID of the new parent page.
+        confirm: Must be True to actually move. False (default) shows a preview.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        target_parent_id = await _resolve_page_id(client, target_parent_id)
+
+        # Fetch both pages in parallel for context
+        async def _fetch_source():
+            return await _get_page_raw(client, page_id)
+
+        async def _fetch_target():
+            return await _get_page_raw(client, target_parent_id)
+
+        source, target = await asyncio.gather(_fetch_source(), _fetch_target())
+
+        src_title = source["title"]
+        src_version = source["version"]["number"]
+        src_space = source.get("spaceId", "?")
+        tgt_title = target["title"]
+        tgt_space = target.get("spaceId", "?")
+
+        cross_space = src_space != tgt_space
+
+        if not confirm:
+            preview = (
+                f"⚠ MOVE PREVIEW — This will move the following page:\n"
+                f"  Page:        \"{src_title}\" (id={page_id})\n"
+                f"  From space:  {src_space}\n"
+                f"  To parent:   \"{tgt_title}\" (id={target_parent_id})\n"
+                f"  In space:    {tgt_space}\n"
+            )
+            if cross_space:
+                preview += f"\n  ⚠ This is a CROSS-SPACE move!\n"
+            preview += f"\nTo proceed, call again with confirm=True."
+            return _text(preview)
+
+        result = await _push_page_update(
+            client, page_id, src_title,
+            _parse_adf(source), src_version,
+            f"Moved under \"{tgt_title}\"",
+        )
+
+        # Update parent via v1 API (v2 PUT doesn't support parentId directly in all versions)
+        move_payload = {
+            "type": "page",
+            "ancestors": [{"id": target_parent_id}],
+        }
+        resp = await client.put(
+            f"{BASE_URL}/rest/api/content/{page_id}",
+            json={
+                "type": "page",
+                "title": src_title,
+                "version": {"number": result["version"]["number"] + 1},
+                "ancestors": [{"id": target_parent_id}],
+            },
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+
+    msg = f"Moved \"{src_title}\" under \"{tgt_title}\" (id={target_parent_id})."
+    if cross_space:
+        msg += f" (cross-space: {src_space} → {tgt_space})"
+    return _text(msg)
+
+
 if __name__ == "__main__":
     mcp.run()
