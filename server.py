@@ -135,6 +135,109 @@ def _cache_after_push(result: dict, adf: dict, space_id: str = "") -> None:
     _write_cache(result["id"], page_data)
 
 
+def _extract_text_from_adf(node: dict | list, depth: int = 0) -> str:
+    """Recursively extract text from an ADF tree with basic formatting.
+
+    Produces readable plaintext: newlines between paragraphs, bullet prefixes
+    for list items, tab-separated table cells, etc.
+    """
+    if isinstance(node, list):
+        return "".join(_extract_text_from_adf(item, depth) for item in node)
+
+    if not isinstance(node, dict):
+        return ""
+
+    node_type = node.get("type", "")
+
+    # Leaf text node
+    if node_type == "text":
+        return node.get("text", "")
+
+    # Mention node
+    if node_type == "mention":
+        return node.get("attrs", {}).get("text", "")
+
+    # Emoji
+    if node_type == "emoji":
+        return node.get("attrs", {}).get("shortName", "")
+
+    # Inline card (link)
+    if node_type == "inlineCard":
+        return node.get("attrs", {}).get("url", "")
+
+    # Hard break
+    if node_type == "hardBreak":
+        return "\n"
+
+    # Status lozenge
+    if node_type == "status":
+        return f"[{node.get('attrs', {}).get('text', '')}]"
+
+    content = node.get("content", [])
+    inner = _extract_text_from_adf(content, depth)
+
+    # Block-level formatting
+    if node_type in ("paragraph", "heading"):
+        return inner + "\n"
+
+    if node_type == "bulletList":
+        return inner
+
+    if node_type == "orderedList":
+        return inner
+
+    if node_type == "listItem":
+        prefix = "  " * depth + "- "
+        # Indent inner content lines
+        lines = inner.strip().split("\n")
+        result = prefix + lines[0] + "\n"
+        for line in lines[1:]:
+            result += "  " * depth + "  " + line + "\n"
+        return result
+
+    if node_type == "taskList":
+        return inner
+
+    if node_type == "taskItem":
+        state = node.get("attrs", {}).get("state", "TODO")
+        checkbox = "[x]" if state == "DONE" else "[ ]"
+        return f"  {checkbox} {inner.strip()}\n"
+
+    if node_type == "table":
+        return inner + "\n"
+
+    if node_type == "tableRow":
+        cells = content
+        parts = [_extract_text_from_adf(c, depth).strip() for c in cells]
+        return "\t".join(parts) + "\n"
+
+    if node_type in ("tableCell", "tableHeader"):
+        return inner
+
+    if node_type == "codeBlock":
+        lang = node.get("attrs", {}).get("language", "")
+        header = f"```{lang}\n" if lang else "```\n"
+        return header + inner + "```\n"
+
+    if node_type == "blockquote":
+        lines = inner.strip().split("\n")
+        return "\n".join(f"> {line}" for line in lines) + "\n"
+
+    if node_type == "rule":
+        return "---\n"
+
+    if node_type == "panel":
+        panel_type = node.get("attrs", {}).get("panelType", "info")
+        return f"[{panel_type}] {inner}"
+
+    if node_type == "expand":
+        title = node.get("attrs", {}).get("title", "")
+        return f"▸ {title}\n{inner}" if title else inner
+
+    # Default: just return inner content
+    return inner
+
+
 @mcp.tool()
 async def confluence_get_page(page_id: str) -> CallToolResult:
     """Fetch a Confluence page and cache it locally for editing.
@@ -592,6 +695,147 @@ async def confluence_get_ancestors(
         lines.append(f"{indent}[{a['id']}] \"{a['title']}\"")
 
     return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_get_labels(
+    page_id: str,
+) -> CallToolResult:
+    """Get all labels on a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/labels",
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    labels = data.get("results", [])
+    if not labels:
+        return _text("No labels on this page.")
+
+    names = [l.get("name", "?") for l in labels]
+    return _text(f"{len(names)} label(s): {', '.join(names)}")
+
+
+@mcp.tool()
+async def confluence_add_labels(
+    page_id: str,
+    labels: list[str],
+) -> CallToolResult:
+    """Add labels to a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        labels: List of label names to add, e.g. ["important", "reviewed"].
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        payload = [{"prefix": "global", "name": name} for name in labels]
+        resp = await client.post(
+            f"{BASE_URL}/rest/api/content/{page_id}/label",
+            json=payload,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    added = result.get("results", result) if isinstance(result, dict) else result
+    count = len(added) if isinstance(added, list) else len(labels)
+    return _text(f"Added {count} label(s): {', '.join(labels)}")
+
+
+@mcp.tool()
+async def confluence_remove_label(
+    page_id: str,
+    label: str,
+) -> CallToolResult:
+    """Remove a label from a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        label: The label name to remove.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.delete(
+            f"{BASE_URL}/rest/api/content/{page_id}/label/{label}",
+            auth=_auth(),
+        )
+        # 404 means label wasn't there — not an error
+        if resp.status_code == 404:
+            return _text(f"Label \"{label}\" was not on this page.")
+        resp.raise_for_status()
+
+    return _text(f"Removed label \"{label}\".")
+
+
+@mcp.tool()
+async def confluence_list_versions(
+    page_id: str,
+    limit: int = 10,
+) -> CallToolResult:
+    """List version history of a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        limit: Maximum number of versions to return (default 10, max 50).
+    """
+    limit = min(limit, 50)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/versions",
+            params={"limit": limit},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    versions = data.get("results", [])
+    if not versions:
+        return _text("No version history found.")
+
+    lines = [f"{len(versions)} version(s):"]
+    for v in versions:
+        num = v.get("number", "?")
+        msg = v.get("message", "")
+        author = v.get("authorId", "?")
+        created = v.get("createdAt", "?")
+        line = f"  v{num} by {author} at {created}"
+        if msg:
+            line += f" — \"{msg}\""
+        lines.append(line)
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_extract_text(
+    page_id: str,
+) -> CallToolResult:
+    """Extract plain text content from a Confluence page.
+
+    Fetches the page ADF and converts it to readable plaintext with basic
+    formatting (paragraphs, bullet lists, tables, code blocks, etc.).
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+
+    adf = _parse_adf(data)
+    text = _extract_text_from_adf(adf)
+
+    title = data.get("title", "?")
+    return _text(f"# {title}\n\n{text.strip()}")
 
 
 @mcp.tool()
