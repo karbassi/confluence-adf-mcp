@@ -37,3 +37,4 @@ _No planned items._
 - [x] Copy page
 - [x] Get user
 - [x] Redundancy removal refactor (extracted shared helpers, removed dead code)
+- [x] OAuth 2.0 (3LO) token refresh support with proactive refresh and rotating token persistence
