@@ -1358,6 +1358,242 @@ async def confluence_get_contributors(
 
 
 @mcp.tool()
+async def confluence_add_link(
+    page_id: str,
+    link_text: str,
+    url: str,
+    after_text: str = "",
+) -> CallToolResult:
+    """Add a hyperlink to a Confluence page.
+
+    If after_text is provided, the link is inserted right after the first occurrence
+    of that text in a paragraph. Otherwise it's appended as a new paragraph at the
+    end of the page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        link_text: The display text for the link.
+        url: The URL to link to.
+        after_text: Optional text to insert the link after (inline within a paragraph).
+    """
+    link_node = {
+        "type": "text",
+        "text": link_text,
+        "marks": [{"type": "link", "attrs": {"href": url}}],
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+        adf = _parse_adf(data)
+
+        inserted = False
+
+        if after_text:
+            # Walk ADF and split text node to insert link inline
+            def _insert_after(node):
+                nonlocal inserted
+                if inserted:
+                    return
+                if isinstance(node, dict) and "content" in node:
+                    content = node["content"]
+                    if isinstance(content, list):
+                        for i, child in enumerate(content):
+                            if (
+                                not inserted
+                                and isinstance(child, dict)
+                                and child.get("type") == "text"
+                                and after_text in child.get("text", "")
+                            ):
+                                text = child["text"]
+                                idx = text.index(after_text) + len(after_text)
+                                before = text[:idx]
+                                after = text[idx:]
+
+                                new_nodes = []
+                                if before:
+                                    before_node = {"type": "text", "text": before}
+                                    if "marks" in child:
+                                        before_node["marks"] = child["marks"]
+                                    new_nodes.append(before_node)
+                                new_nodes.append({"type": "text", "text": " "})
+                                new_nodes.append(link_node)
+                                if after:
+                                    after_node = {"type": "text", "text": after}
+                                    if "marks" in child:
+                                        after_node["marks"] = child["marks"]
+                                    new_nodes.append(after_node)
+
+                                content[i:i+1] = new_nodes
+                                inserted = True
+                                return
+                        for child in content:
+                            _insert_after(child)
+                elif isinstance(node, dict):
+                    for v in node.values():
+                        if isinstance(v, (dict, list)):
+                            _insert_after(v)
+                elif isinstance(node, list):
+                    for item in node:
+                        _insert_after(item)
+
+            _insert_after(adf)
+
+            if not inserted:
+                return _text(f"Text \"{after_text}\" not found on page.")
+        else:
+            # Append as new paragraph
+            link_paragraph = {
+                "type": "paragraph",
+                "content": [link_node],
+            }
+            adf.setdefault("content", []).append(link_paragraph)
+            inserted = True
+
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            f"Added link: {link_text}",
+        )
+
+    _cache_after_push(result, adf, data.get("spaceId"))
+
+    return _text(f"Added link \"{link_text}\" → {url} (v{result['version']['number']}).")
+
+
+@mcp.tool()
+async def confluence_upload_attachment(
+    page_id: str,
+    file_path: str,
+    comment: str = "",
+) -> CallToolResult:
+    """Upload a file as an attachment to a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        file_path: Local file path to upload.
+        comment: Optional comment for the attachment.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        return _text(f"File not found: {file_path}")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        files = {"file": (path.name, path.read_bytes())}
+        data = {}
+        if comment:
+            data["comment"] = comment
+
+        resp = await client.post(
+            f"{BASE_URL}/rest/api/content/{page_id}/child/attachment",
+            files=files,
+            data=data,
+            auth=_auth(),
+            headers={"X-Atlassian-Token": "nocheck"},
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    results = result.get("results", [result])
+    if results:
+        att = results[0]
+        return _text(f"Uploaded \"{att.get('title', path.name)}\" (id={att.get('id', '?')}) to page {page_id}.")
+    return _text(f"Uploaded {path.name} to page {page_id}.")
+
+
+@mcp.tool()
+async def confluence_set_restrictions(
+    page_id: str,
+    operation: str,
+    users: list[str] = [],
+    groups: list[str] = [],
+) -> CallToolResult:
+    """Set access restrictions on a Confluence page.
+
+    Replaces existing restrictions for the given operation. To remove all
+    restrictions, pass empty users and groups lists.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        operation: The operation to restrict — "read" or "update".
+        users: List of account IDs to grant access.
+        groups: List of group names to grant access.
+    """
+    operation = operation.lower()
+    if operation not in ("read", "update"):
+        return _text(f"Invalid operation \"{operation}\". Use \"read\" or \"update\".")
+
+    restrictions = []
+    for user_id in users:
+        restrictions.append({
+            "type": "user",
+            "accountId": user_id,
+        })
+    for group_name in groups:
+        restrictions.append({
+            "type": "group",
+            "name": group_name,
+        })
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        payload = [{
+            "operation": operation,
+            "restrictions": {
+                "user": [{"type": "known", "accountId": uid} for uid in users],
+                "group": [{"type": "group", "name": gn} for gn in groups],
+            },
+        }]
+
+        resp = await client.put(
+            f"{BASE_URL}/rest/api/content/{page_id}/restriction",
+            json=payload,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+
+    count = len(users) + len(groups)
+    if count == 0:
+        return _text(f"Cleared {operation} restrictions on page {page_id}.")
+    return _text(f"Set {operation} restrictions: {len(users)} user(s), {len(groups)} group(s) on page {page_id}.")
+
+
+@mcp.tool()
+async def confluence_watch_page(
+    page_id: str,
+    watch: bool = True,
+) -> CallToolResult:
+    """Watch or unwatch a Confluence page for the authenticated user.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        watch: True to start watching, False to stop watching.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        if watch:
+            resp = await client.post(
+                f"{BASE_URL}/rest/api/user/watch/content/{page_id}",
+                auth=_auth(),
+                headers={"X-Atlassian-Token": "nocheck", "Content-Type": "application/json"},
+            )
+        else:
+            resp = await client.delete(
+                f"{BASE_URL}/rest/api/user/watch/content/{page_id}",
+                auth=_auth(),
+            )
+
+        resp.raise_for_status()
+
+    action = "Watching" if watch else "Unwatched"
+    return _text(f"{action} page {page_id}.")
+
+
+@mcp.tool()
 async def confluence_revert_page(
     page_id: str,
     version_number: int,
