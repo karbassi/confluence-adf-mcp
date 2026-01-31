@@ -96,8 +96,8 @@ class TestPushPage:
         assert cached["version"] == 2
 
     async def test_missing_cache(self, tmp_cache):
-        with pytest.raises(FileNotFoundError):
-            await server.confluence_push_page("nonexistent")
+        result = await server.confluence_push_page("nonexistent")
+        assert "No cached page for nonexistent" in result.content[0].text
 
     @respx.mock
     async def test_api_error(self, tmp_cache):
@@ -106,8 +106,8 @@ class TestPushPage:
         respx.put(f"{BASE}/api/v2/pages/1").mock(
             return_value=httpx.Response(500)
         )
-        with pytest.raises(httpx.HTTPStatusError):
-            await server.confluence_push_page("1")
+        result = await server.confluence_push_page("1")
+        assert "server error" in result.content[0].text
 
 
 # ---------------------------------------------------------------------------
@@ -1051,8 +1051,8 @@ class TestArchivePage:
         respx.put(f"{BASE}/api/v2/pages/12345").mock(
             return_value=httpx.Response(403)
         )
-        with pytest.raises(httpx.HTTPStatusError):
-            await server.confluence_archive_page("12345", confirm=True)
+        result = await server.confluence_archive_page("12345", confirm=True)
+        assert "Permission denied" in result.content[0].text
 
 
 # ---------------------------------------------------------------------------

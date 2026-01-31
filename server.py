@@ -1,9 +1,11 @@
 import asyncio
 import difflib
+import functools
 import json
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -24,8 +26,70 @@ CACHE_DIR = Path(os.environ.get("CACHE_DIR", ".cache/confluence"))
 BASE_URL = CONFLUENCE_URL.rstrip("/")
 
 
+class _RetryTransport(httpx.AsyncBaseTransport):
+    """Async transport that retries on 429 (rate-limited) responses."""
+
+    def __init__(self, max_retries: int = 2):
+        self._transport = httpx.AsyncHTTPTransport()
+        self._max_retries = max_retries
+
+    async def handle_async_request(self, request):
+        for attempt in range(self._max_retries + 1):
+            resp = await self._transport.handle_async_request(request)
+            if resp.status == 429 and attempt < self._max_retries:
+                headers = dict(resp.headers)
+                wait = min(int(headers.get(b"retry-after", b"2")), 10)
+                await asyncio.sleep(wait)
+                continue
+            return resp
+        return resp  # unreachable but satisfies type checkers
+
+
+def _make_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """Create an HTTP client with automatic 429 retry."""
+    return httpx.AsyncClient(timeout=timeout, transport=_RetryTransport())
+
+
 def _auth() -> httpx.BasicAuth:
     return httpx.BasicAuth(CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN)
+
+
+def _friendly_error(e: httpx.HTTPStatusError) -> str:
+    """Map an HTTP error to a human-readable message."""
+    status = e.response.status_code
+    url_path = str(e.request.url).replace(BASE_URL, "")
+    body = e.response.text[:200].strip()
+
+    if status == 401:
+        msg = "Authentication failed — check CONFLUENCE_USERNAME and CONFLUENCE_API_TOKEN."
+    elif status == 403:
+        msg = "Permission denied — your account lacks access to this resource."
+    elif status == 404:
+        msg = "Not found — the page, space, or resource does not exist."
+    elif status == 429:
+        msg = "Rate limited — Confluence is throttling requests. Try again shortly."
+    elif 500 <= status < 600:
+        msg = f"Confluence server error ({status})."
+    else:
+        msg = f"HTTP {status} error."
+
+    detail = f" (path: {url_path})" if url_path else ""
+    if body:
+        detail += f"\nResponse: {body}"
+    return msg + detail
+
+
+def _with_error_handling(func):
+    """Decorator that catches HTTP and file errors, returning friendly messages."""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except httpx.HTTPStatusError as e:
+            return _text(_friendly_error(e))
+        except FileNotFoundError as e:
+            return _text(str(e))
+    return wrapper
 
 
 def _cache_path(page_id: str) -> Path:
@@ -292,6 +356,7 @@ async def _get_page_version_adf(client: httpx.AsyncClient, page_id: str, version
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_page(page_id: str) -> CallToolResult:
     """Fetch a Confluence page and cache it locally for editing.
 
@@ -301,7 +366,7 @@ async def confluence_get_page(page_id: str) -> CallToolResult:
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
 
@@ -321,6 +386,7 @@ async def confluence_get_page(page_id: str) -> CallToolResult:
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_edit_page(
     page_id: str,
     find: str,
@@ -373,6 +439,7 @@ async def confluence_edit_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_push_page(
     page_id: str,
     version_message: str = "",
@@ -391,7 +458,7 @@ async def confluence_push_page(
     cached = _read_cache(page_id)
     page_id = cached["id"]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         result = await _push_page_update(
             client, page_id, cached["title"], cached["adf"],
             cached["version"], version_message or "Updated via MCP",
@@ -403,6 +470,7 @@ async def confluence_push_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_find_replace(
     page_id: str,
     find: str,
@@ -424,7 +492,7 @@ async def confluence_find_replace(
     """
     t0 = time.perf_counter()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -469,6 +537,7 @@ async def confluence_find_replace(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_create_page(
     space_id: str,
     title: str,
@@ -495,7 +564,7 @@ async def confluence_create_page(
     if parent_id:
         payload["parentId"] = parent_id
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         resp = await client.post(
             f"{BASE_URL}/api/v2/pages",
             json=payload,
@@ -508,6 +577,7 @@ async def confluence_create_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_replace_mention(
     page_id: str,
     find_user: str,
@@ -525,7 +595,7 @@ async def confluence_replace_mention(
     """
     t0 = time.perf_counter()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         # Fetch page and search user in parallel
@@ -601,6 +671,7 @@ async def confluence_replace_mention(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_search_pages(
     query: str,
     limit: int = 10,
@@ -618,7 +689,7 @@ async def confluence_search_pages(
     # If the query doesn't contain CQL operators, wrap it as a text search
     cql = query if any(op in query for op in ("=", "~", " AND ", " OR ", " IN ")) else f'type=page AND (title~"{query}" OR text~"{query}")'
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         resp = await client.get(
             f"{BASE_URL}/rest/api/search",
             params={"cql": cql, "limit": limit},
@@ -650,6 +721,7 @@ async def confluence_search_pages(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_list_pages(
     space_id: str,
     limit: int = 25,
@@ -663,7 +735,7 @@ async def confluence_list_pages(
         sort: Sort order — "title", "-title", "created-date", "-modified-date", etc.
     """
     limit = min(limit, 250)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         resp = await client.get(
             f"{BASE_URL}/api/v2/spaces/{space_id}/pages",
             params={"limit": limit, "sort": sort},
@@ -686,6 +758,7 @@ async def confluence_list_pages(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_child_pages(
     page_id: str,
     limit: int = 25,
@@ -697,7 +770,7 @@ async def confluence_get_child_pages(
         limit: Maximum number of children to return (default 25, max 250).
     """
     limit = min(limit, 250)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/children",
@@ -719,6 +792,7 @@ async def confluence_get_child_pages(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_ancestors(
     page_id: str,
 ) -> CallToolResult:
@@ -729,7 +803,7 @@ async def confluence_get_ancestors(
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/ancestors",
@@ -751,6 +825,7 @@ async def confluence_get_ancestors(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_labels(
     page_id: str,
 ) -> CallToolResult:
@@ -759,7 +834,7 @@ async def confluence_get_labels(
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/labels",
@@ -777,6 +852,7 @@ async def confluence_get_labels(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_add_labels(
     page_id: str,
     labels: list[str],
@@ -787,7 +863,7 @@ async def confluence_add_labels(
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         labels: List of label names to add, e.g. ["important", "reviewed"].
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         payload = [{"prefix": "global", "name": name} for name in labels]
         resp = await client.post(
@@ -804,6 +880,7 @@ async def confluence_add_labels(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_remove_label(
     page_id: str,
     label: str,
@@ -814,7 +891,7 @@ async def confluence_remove_label(
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         label: The label name to remove.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.delete(
             f"{BASE_URL}/rest/api/content/{page_id}/label/{label}",
@@ -829,6 +906,7 @@ async def confluence_remove_label(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_list_versions(
     page_id: str,
     limit: int = 10,
@@ -840,7 +918,7 @@ async def confluence_list_versions(
         limit: Maximum number of versions to return (default 10, max 50).
     """
     limit = min(limit, 50)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/versions",
@@ -869,6 +947,7 @@ async def confluence_list_versions(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_extract_text(
     page_id: str,
 ) -> CallToolResult:
@@ -880,7 +959,7 @@ async def confluence_extract_text(
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
 
@@ -892,6 +971,7 @@ async def confluence_extract_text(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_update_task(
     page_id: str,
     task_text: str,
@@ -910,7 +990,7 @@ async def confluence_update_task(
     if state not in ("DONE", "TODO"):
         return _text(f"Invalid state \"{state}\". Use \"DONE\" or \"TODO\".")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -948,6 +1028,7 @@ async def confluence_update_task(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_regex_replace(
     page_id: str,
     pattern: str,
@@ -970,7 +1051,7 @@ async def confluence_regex_replace(
     except re.error as e:
         return _text(f"Invalid regex: {e}")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -1008,6 +1089,7 @@ async def confluence_regex_replace(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_update_table_cell(
     page_id: str,
     row: int,
@@ -1024,7 +1106,7 @@ async def confluence_update_table_cell(
         value: New text value for the cell.
         table_index: Which table on the page (0-based, default first table).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -1066,6 +1148,7 @@ async def confluence_update_table_cell(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_insert_table_row(
     page_id: str,
     row_index: int,
@@ -1080,7 +1163,7 @@ async def confluence_insert_table_row(
         values: List of cell values for the new row.
         table_index: Which table on the page (0-based, default first table).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -1115,6 +1198,7 @@ async def confluence_insert_table_row(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_delete_table_row(
     page_id: str,
     row_index: int,
@@ -1127,7 +1211,7 @@ async def confluence_delete_table_row(
         row_index: Zero-based row index to delete.
         table_index: Which table on the page (0-based, default first table).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -1158,6 +1242,7 @@ async def confluence_delete_table_row(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_add_comment(
     page_id: str,
     body: str,
@@ -1181,7 +1266,7 @@ async def confluence_add_comment(
         ],
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         payload = {
             "pageId": page_id,
@@ -1206,6 +1291,7 @@ async def confluence_add_comment(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_list_comments(
     page_id: str,
     limit: int = 25,
@@ -1217,7 +1303,7 @@ async def confluence_list_comments(
         limit: Maximum number of comments to return (default 25, max 100).
     """
     limit = min(limit, 100)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/footer-comments",
@@ -1244,6 +1330,7 @@ async def confluence_list_comments(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_compare_versions(
     page_id: str,
     version_a: int,
@@ -1259,7 +1346,7 @@ async def confluence_compare_versions(
         version_a: The "before" version number.
         version_b: The "after" version number.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         adf_a, adf_b = await asyncio.gather(
@@ -1283,6 +1370,7 @@ async def confluence_compare_versions(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_list_attachments(
     page_id: str,
     limit: int = 25,
@@ -1294,7 +1382,7 @@ async def confluence_list_attachments(
         limit: Maximum number of attachments to return (default 25, max 100).
     """
     limit = min(limit, 100)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
@@ -1321,6 +1409,7 @@ async def confluence_list_attachments(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_contributors(
     page_id: str,
 ) -> CallToolResult:
@@ -1329,7 +1418,7 @@ async def confluence_get_contributors(
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/versions",
@@ -1358,6 +1447,7 @@ async def confluence_get_contributors(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_add_link(
     page_id: str,
     link_text: str,
@@ -1382,7 +1472,7 @@ async def confluence_add_link(
         "marks": [{"type": "link", "attrs": {"href": url}}],
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
@@ -1462,6 +1552,7 @@ async def confluence_add_link(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_upload_attachment(
     page_id: str,
     file_path: str,
@@ -1504,6 +1595,7 @@ async def confluence_upload_attachment(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_set_restrictions(
     page_id: str,
     operation: str,
@@ -1537,7 +1629,7 @@ async def confluence_set_restrictions(
             "name": group_name,
         })
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         payload = [{
@@ -1562,6 +1654,7 @@ async def confluence_set_restrictions(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_watch_page(
     page_id: str,
     watch: bool = True,
@@ -1572,7 +1665,7 @@ async def confluence_watch_page(
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         watch: True to start watching, False to stop watching.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         if watch:
@@ -1594,6 +1687,7 @@ async def confluence_watch_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_revert_page(
     page_id: str,
     version_number: int,
@@ -1608,7 +1702,7 @@ async def confluence_revert_page(
         version_number: The version number to revert to.
         version_message: Optional message describing the revert.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         payload = {
@@ -1632,6 +1726,7 @@ async def confluence_revert_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_list_spaces(
     limit: int = 25,
     type: str = "",
@@ -1649,7 +1744,7 @@ async def confluence_list_spaces(
     if type:
         params["type"] = type
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         resp = await client.get(
             f"{BASE_URL}/api/v2/spaces",
             params=params,
@@ -1674,6 +1769,7 @@ async def confluence_list_spaces(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_archive_page(
     page_id: str,
     confirm: bool = False,
@@ -1690,7 +1786,7 @@ async def confluence_archive_page(
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         confirm: Must be True to actually archive. False (default) shows a preview.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
 
@@ -1729,6 +1825,7 @@ async def confluence_archive_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_move_page(
     page_id: str,
     target_parent_id: str,
@@ -1747,7 +1844,7 @@ async def confluence_move_page(
         target_parent_id: The page ID of the new parent page.
         confirm: Must be True to actually move. False (default) shows a preview.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         target_parent_id = await _resolve_page_id(client, target_parent_id)
 
@@ -1811,6 +1908,7 @@ async def confluence_move_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_download_attachment(
     page_id: str,
     attachment_title: str,
@@ -1858,6 +1956,7 @@ async def confluence_download_attachment(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_delete_attachment(
     page_id: str,
     attachment_title: str,
@@ -1876,7 +1975,7 @@ async def confluence_delete_attachment(
         attachment_title: The filename of the attachment to delete.
         confirm: Must be True to actually delete. False (default) shows a preview.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         resp = await client.get(
@@ -1921,6 +2020,7 @@ async def confluence_delete_attachment(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_list_inline_comments(
     page_id: str,
     limit: int = 25,
@@ -1935,7 +2035,7 @@ async def confluence_list_inline_comments(
         limit: Maximum number of comments to return (default 25, max 100).
     """
     limit = min(limit, 100)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/inline-comments",
@@ -1971,6 +2071,7 @@ async def confluence_list_inline_comments(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_add_inline_comment(
     page_id: str,
     body: str,
@@ -1999,7 +2100,7 @@ async def confluence_add_inline_comment(
         ],
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         payload = {
@@ -2028,6 +2129,7 @@ async def confluence_add_inline_comment(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_page_properties(
     page_id: str,
     limit: int = 25,
@@ -2041,7 +2143,7 @@ async def confluence_get_page_properties(
         limit: Maximum number of properties to return (default 25, max 100).
     """
     limit = min(limit, 100)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/properties",
@@ -2070,6 +2172,7 @@ async def confluence_get_page_properties(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_set_page_property(
     page_id: str,
     key: str,
@@ -2091,7 +2194,7 @@ async def confluence_set_page_property(
         # Treat as plain string
         parsed_value = value
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         # Check if property already exists
@@ -2144,6 +2247,7 @@ async def confluence_set_page_property(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_copy_page(
     page_id: str,
     title: str = "",
@@ -2162,7 +2266,7 @@ async def confluence_copy_page(
         copy_labels: Whether to copy labels (default True).
         copy_attachments: Whether to copy attachments (default True).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
 
@@ -2195,6 +2299,7 @@ async def confluence_copy_page(
 
 
 @mcp.tool()
+@_with_error_handling
 async def confluence_get_user(
     account_id: str,
 ) -> CallToolResult:
@@ -2206,7 +2311,7 @@ async def confluence_get_user(
     Args:
         account_id: The Confluence/Atlassian account ID.
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with _make_client(timeout=30.0) as client:
         resp = await client.get(
             f"{BASE_URL}/rest/api/user",
             params={"accountId": account_id},

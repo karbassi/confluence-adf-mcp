@@ -198,3 +198,50 @@ class TestGetPageVersionAdf:
         async with httpx.AsyncClient() as client:
             result = await server._get_page_version_adf(client, "1", 1)
         assert result == adf
+
+
+# ---------------------------------------------------------------------------
+# _with_error_handling decorator
+# ---------------------------------------------------------------------------
+
+class TestWithErrorHandling:
+    @respx.mock
+    async def test_401_auth_error(self, tmp_cache):
+        respx.get(f"{BASE}/api/v2/pages/1").mock(
+            return_value=httpx.Response(401)
+        )
+        result = await server.confluence_get_page("1")
+        text = result.content[0].text
+        assert "Authentication failed" in text
+
+    @respx.mock
+    async def test_404_not_found(self, tmp_cache):
+        respx.get(f"{BASE}/api/v2/pages/999").mock(
+            return_value=httpx.Response(404)
+        )
+        result = await server.confluence_get_page("999")
+        text = result.content[0].text
+        assert "Not found" in text
+
+    @respx.mock
+    async def test_429_rate_limited(self, tmp_cache):
+        respx.get(f"{BASE}/api/v2/pages/1").mock(
+            return_value=httpx.Response(429)
+        )
+        result = await server.confluence_get_page("1")
+        text = result.content[0].text
+        assert "Rate limited" in text
+
+    @respx.mock
+    async def test_500_server_error(self, tmp_cache):
+        respx.get(f"{BASE}/api/v2/pages/1").mock(
+            return_value=httpx.Response(500, text="Internal Server Error")
+        )
+        result = await server.confluence_get_page("1")
+        text = result.content[0].text
+        assert "server error" in text
+
+    async def test_file_not_found(self, tmp_cache):
+        result = await server.confluence_push_page("nonexistent")
+        text = result.content[0].text
+        assert "No cached page for nonexistent" in text

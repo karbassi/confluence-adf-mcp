@@ -55,8 +55,8 @@ class TestGetPage:
         respx.get(f"{BASE}/api/v2/pages/404").mock(
             return_value=httpx.Response(404)
         )
-        with pytest.raises(httpx.HTTPStatusError):
-            await server.confluence_get_page("404")
+        result = await server.confluence_get_page("404")
+        assert "Not found" in result.content[0].text
 
 
 # ---------------------------------------------------------------------------
