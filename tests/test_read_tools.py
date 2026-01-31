@@ -576,3 +576,48 @@ class TestGetContributors:
         )
         result = await server.confluence_get_contributors("1")
         assert "No version history" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# confluence_list_cache
+# ---------------------------------------------------------------------------
+
+class TestListCache:
+    async def test_with_entries(self, tmp_cache):
+        server._write_cache("1", {"id": "1", "title": "Page A", "version": 1, "adf": {}})
+        server._write_cache("2", {"id": "2", "title": "Page B", "version": 2, "adf": {}})
+        result = await server.confluence_list_cache()
+        text = result.content[0].text
+        assert "2 cached page(s)" in text
+        assert "Page A" in text
+        assert "Page B" in text
+
+    async def test_empty(self, tmp_cache):
+        result = await server.confluence_list_cache()
+        assert "Cache is empty" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# confluence_clear_cache
+# ---------------------------------------------------------------------------
+
+class TestClearCache:
+    async def test_clear_specific_page(self, tmp_cache):
+        server._write_cache("1", {"id": "1", "title": "T", "version": 1, "adf": {}})
+        result = await server.confluence_clear_cache("1")
+        assert "Cleared cache for page 1" in result.content[0].text
+        assert not (tmp_cache / "1.json").exists()
+
+    async def test_clear_all(self, tmp_cache):
+        server._write_cache("1", {"id": "1", "title": "T", "version": 1, "adf": {}})
+        server._write_cache("2", {"id": "2", "title": "T", "version": 1, "adf": {}})
+        result = await server.confluence_clear_cache()
+        assert "Cleared 2 cached page(s)" in result.content[0].text
+
+    async def test_clear_missing_page(self, tmp_cache):
+        result = await server.confluence_clear_cache("999")
+        assert "No cache found" in result.content[0].text
+
+    async def test_clear_already_empty(self, tmp_cache):
+        result = await server.confluence_clear_cache()
+        assert "Cache is already empty" in result.content[0].text

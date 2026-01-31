@@ -344,6 +344,16 @@ def _build_table_row(values: list[str], cell_type: str = "tableCell") -> dict:
     }
 
 
+def _extract_next_cursor(data: dict) -> str:
+    """Extract pagination cursor from v2 API response _links.next."""
+    next_url = data.get("_links", {}).get("next", "")
+    if next_url:
+        m = re.search(r"cursor=([^&]+)", next_url)
+        if m:
+            return m.group(1)
+    return ""
+
+
 async def _get_page_version_adf(client: httpx.AsyncClient, page_id: str, version: int) -> dict:
     """Fetch ADF for a specific historical version using the v1 API."""
     resp = await client.get(
