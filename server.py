@@ -412,9 +412,7 @@ async def _get_page_version_adf(client: httpx.AsyncClient, page_id: str, version
         auth=_auth(),
     )
     resp.raise_for_status()
-    data = resp.json()
-    adf_value = data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
-    return json.loads(adf_value)
+    return _parse_adf(resp.json())
 
 
 @mcp.tool()
@@ -1915,13 +1913,10 @@ async def confluence_move_page(
         target_parent_id = await _resolve_page_id(client, target_parent_id)
 
         # Fetch both pages in parallel for context
-        async def _fetch_source():
-            return await _get_page_raw(client, page_id)
-
-        async def _fetch_target():
-            return await _get_page_raw(client, target_parent_id)
-
-        source, target = await asyncio.gather(_fetch_source(), _fetch_target())
+        source, target = await asyncio.gather(
+            _get_page_raw(client, page_id),
+            _get_page_raw(client, target_parent_id),
+        )
 
         src_title = source["title"]
         src_version = source["version"]["number"]
@@ -2311,18 +2306,14 @@ async def confluence_copy_page(
         original_title = data["title"]
         copy_title = title or f"Copy of {original_title}"
 
-        destination = {"type": "parent_page", "value": destination_parent_id} if destination_parent_id else None
-
         payload = {
             "copyAttachments": copy_attachments,
             "copyLabels": copy_labels,
             "copyPermissions": False,
-            "destination": destination,
             "pageTitle": copy_title,
         }
-        # Remove None destination
-        if destination is None:
-            del payload["destination"]
+        if destination_parent_id:
+            payload["destination"] = {"type": "parent_page", "value": destination_parent_id}
 
         resp = await client.post(
             f"{BASE_URL}/rest/api/content/{page_id}/copy",
