@@ -245,3 +245,47 @@ class TestWithErrorHandling:
         result = await server.confluence_push_page("nonexistent")
         text = result.content[0].text
         assert "No cached page for nonexistent" in text
+
+
+# ---------------------------------------------------------------------------
+# _RetryTransport (429 retry)
+# ---------------------------------------------------------------------------
+
+class TestRetryTransport:
+    @respx.mock
+    async def test_429_retry_succeeds(self, tmp_cache):
+        """429 followed by 200 should succeed after retry."""
+        page = make_page_response()
+        route = respx.get(f"{BASE}/api/v2/pages/1")
+        route.side_effect = [
+            httpx.Response(429, headers={"Retry-After": "0"}),
+            httpx.Response(200, json=page),
+        ]
+        result = await server.confluence_get_page("1")
+        assert "Test Page" in result.content[0].text
+        assert len(respx.calls) == 2
+
+    @respx.mock
+    async def test_429_no_retry_after_header(self, tmp_cache):
+        """429 without Retry-After header should default to 2s wait."""
+        page = make_page_response()
+        route = respx.get(f"{BASE}/api/v2/pages/1")
+        route.side_effect = [
+            httpx.Response(429),  # No Retry-After header
+            httpx.Response(200, json=page),
+        ]
+        result = await server.confluence_get_page("1")
+        assert "Test Page" in result.content[0].text
+
+    @respx.mock
+    async def test_429_max_retries_exhausted(self, tmp_cache):
+        """Persistent 429s should eventually return the error."""
+        route = respx.get(f"{BASE}/api/v2/pages/1")
+        route.side_effect = [
+            httpx.Response(429, headers={"Retry-After": "0"}),
+            httpx.Response(429, headers={"Retry-After": "0"}),
+            httpx.Response(429, headers={"Retry-After": "0"}),
+        ]
+        result = await server.confluence_get_page("1")
+        # After max_retries (2) exhausted, error handling decorator catches the 429
+        assert "Rate limited" in result.content[0].text

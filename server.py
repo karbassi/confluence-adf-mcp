@@ -36,9 +36,11 @@ class _RetryTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request):
         for attempt in range(self._max_retries + 1):
             resp = await self._transport.handle_async_request(request)
-            if resp.status == 429 and attempt < self._max_retries:
+            status = getattr(resp, "status", None) or getattr(resp, "status_code", 0)
+            if status == 429 and attempt < self._max_retries:
                 headers = dict(resp.headers)
-                wait = min(int(headers.get(b"retry-after", b"2")), 10)
+                raw = headers.get(b"retry-after") or headers.get("retry-after", "2")
+                wait = min(int(raw), 10)
                 await asyncio.sleep(wait)
                 continue
             return resp
@@ -1569,7 +1571,7 @@ async def confluence_upload_attachment(
     if not path.exists():
         return _text(f"File not found: {file_path}")
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with _make_client(timeout=60.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         files = {"file": (path.name, path.read_bytes())}
@@ -1921,7 +1923,7 @@ async def confluence_download_attachment(
         attachment_title: The filename of the attachment to download (e.g. "report.pdf").
         save_path: Local file path to save the downloaded file.
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with _make_client(timeout=60.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
         # Find the attachment by title
@@ -2331,6 +2333,54 @@ async def confluence_get_user(
         info += f" — {email}"
 
     return _text(info)
+
+
+@mcp.tool()
+@_with_error_handling
+async def confluence_list_cache() -> CallToolResult:
+    """List all locally cached Confluence pages.
+
+    Shows page IDs, titles, and when they were last cached.
+    """
+    if not CACHE_DIR.exists():
+        return _text("Cache is empty.")
+    files = sorted(CACHE_DIR.glob("*.json"))
+    if not files:
+        return _text("Cache is empty.")
+    lines = [f"{len(files)} cached page(s):"]
+    for f in files:
+        data = json.loads(f.read_text())
+        pid = data.get("id", f.stem)
+        title = data.get("title", "?")
+        mod_time = datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        lines.append(f"  [{pid}] \"{title}\" (cached: {mod_time})")
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+@_with_error_handling
+async def confluence_clear_cache(page_id: str = "") -> CallToolResult:
+    """Clear the local page cache.
+
+    Removes cached page data. Pass a page_id to clear a specific page,
+    or omit it to clear all cached pages.
+
+    Args:
+        page_id: Optional page ID to clear. Empty clears all cached pages.
+    """
+    if page_id:
+        path = _cache_path(page_id)
+        if path.exists():
+            path.unlink()
+            return _text(f"Cleared cache for page {page_id}.")
+        return _text(f"No cache found for page {page_id}.")
+    if CACHE_DIR.exists():
+        count = 0
+        for f in CACHE_DIR.glob("*.json"):
+            f.unlink()
+            count += 1
+        return _text(f"Cleared {count} cached page(s).")
+    return _text("Cache is already empty.")
 
 
 if __name__ == "__main__":
