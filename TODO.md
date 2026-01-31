@@ -36,3 +36,4 @@ _No planned items._
 - [x] `get_page_properties` / `set_page_properties`
 - [x] Copy page
 - [x] Get user
+- [x] Redundancy removal refactor (extracted shared helpers, removed dead code)
