@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `confluence_download_attachment` tool to download attachments to local files
+- `confluence_delete_attachment` tool with two-step confirmation guard
+- `confluence_list_inline_comments` tool for annotation comments
+- `confluence_add_inline_comment` tool for adding text-anchored comments
+- `confluence_get_page_properties` tool for content metadata
+- `confluence_set_page_property` tool (creates or updates properties)
+- `confluence_copy_page` tool with destination, labels, and attachments options
+- `confluence_get_user` tool to resolve account IDs to display names
 - `confluence_list_spaces` tool for space discovery
 - `confluence_archive_page` tool with two-step confirmation guard
 - `confluence_move_page` tool with two-step confirmation and cross-space warning

@@ -2,12 +2,7 @@
 
 ## Planned
 
-- [ ] Add `download_attachment` tool to complement list/upload
-- [ ] Add `delete_attachment` tool for cleanup
-- [ ] Add inline (annotation) comments support (separate from footer comments)
-- [ ] Add `get_page_properties` / `set_page_properties` for content metadata
-- [ ] Add `copy_page` tool for duplicating pages
-- [ ] Add `get_user` tool to resolve display names from account IDs
+_No planned items._
 
 ## Done
 
@@ -28,3 +23,9 @@
 - [x] Archive page with confirmation guard
 - [x] Move page with confirmation guard
 - [x] Test suite (164 tests)
+- [x] Download attachment
+- [x] Delete attachment
+- [x] Inline (annotation) comments support
+- [x] `get_page_properties` / `set_page_properties`
+- [x] Copy page
+- [x] Get user
