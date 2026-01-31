@@ -687,6 +687,7 @@ async def confluence_replace_mention(
 async def confluence_search_pages(
     query: str,
     limit: int = 10,
+    cursor: str = "",
 ) -> CallToolResult:
     """Search Confluence pages using CQL (Confluence Query Language).
 
@@ -696,15 +697,20 @@ async def confluence_search_pages(
     Args:
         query: CQL query string, e.g. 'type=page AND title~"meeting notes"' or just "meeting notes".
         limit: Maximum number of results to return (default 10, max 50).
+        cursor: Pagination cursor from a previous search result.
     """
     limit = min(limit, 50)
     # If the query doesn't contain CQL operators, wrap it as a text search
     cql = query if any(op in query for op in ("=", "~", " AND ", " OR ", " IN ")) else f'type=page AND (title~"{query}" OR text~"{query}")'
 
+    params: dict = {"cql": cql, "limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         resp = await client.get(
             f"{BASE_URL}/rest/api/search",
-            params={"cql": cql, "limit": limit},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -729,6 +735,10 @@ async def confluence_search_pages(
             line += f" — {excerpt}"
         lines.append(line)
 
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
+
     return _text("\n".join(lines))
 
 
@@ -738,6 +748,7 @@ async def confluence_list_pages(
     space_id: str,
     limit: int = 25,
     sort: str = "title",
+    cursor: str = "",
 ) -> CallToolResult:
     """List pages in a Confluence space.
 
@@ -745,12 +756,17 @@ async def confluence_list_pages(
         space_id: The numeric space ID.
         limit: Maximum number of pages to return (default 25, max 250).
         sort: Sort order — "title", "-title", "created-date", "-modified-date", etc.
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 250)
+    params: dict = {"limit": limit, "sort": sort}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         resp = await client.get(
             f"{BASE_URL}/api/v2/spaces/{space_id}/pages",
-            params={"limit": limit, "sort": sort},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -766,6 +782,10 @@ async def confluence_list_pages(
         status_tag = f" [{status}]" if status and status != "current" else ""
         lines.append(f"  [{p['id']}] \"{p['title']}\"{status_tag}")
 
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
+
     return _text("\n".join(lines))
 
 
@@ -774,19 +794,25 @@ async def confluence_list_pages(
 async def confluence_get_child_pages(
     page_id: str,
     limit: int = 25,
+    cursor: str = "",
 ) -> CallToolResult:
     """Get child pages of a Confluence page.
 
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         limit: Maximum number of children to return (default 25, max 250).
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 250)
+    params: dict = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/children",
-            params={"limit": limit},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -799,6 +825,10 @@ async def confluence_get_child_pages(
     lines = [f"{len(children)} child page(s):"]
     for c in children:
         lines.append(f"  [{c['id']}] \"{c['title']}\"")
+
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
 
     return _text("\n".join(lines))
 
@@ -922,19 +952,25 @@ async def confluence_remove_label(
 async def confluence_list_versions(
     page_id: str,
     limit: int = 10,
+    cursor: str = "",
 ) -> CallToolResult:
     """List version history of a Confluence page.
 
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         limit: Maximum number of versions to return (default 10, max 50).
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 50)
+    params: dict = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/versions",
-            params={"limit": limit},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -954,6 +990,10 @@ async def confluence_list_versions(
         if msg:
             line += f" — \"{msg}\""
         lines.append(line)
+
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
 
     return _text("\n".join(lines))
 
@@ -1307,19 +1347,25 @@ async def confluence_add_comment(
 async def confluence_list_comments(
     page_id: str,
     limit: int = 25,
+    cursor: str = "",
 ) -> CallToolResult:
     """List footer comments on a Confluence page.
 
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         limit: Maximum number of comments to return (default 25, max 100).
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 100)
+    params: dict = {"limit": limit, "body-format": "atlas_doc_format"}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/footer-comments",
-            params={"limit": limit, "body-format": "atlas_doc_format"},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -1337,6 +1383,10 @@ async def confluence_list_comments(
         body_adf = json.loads(c.get("body", {}).get("atlas_doc_format", {}).get("value", "{}"))
         text = _extract_text_from_adf(body_adf).strip()[:200]
         lines.append(f"  [{cid}] by {author} at {created}: {text}")
+
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
 
     return _text("\n".join(lines))
 
@@ -1386,19 +1436,25 @@ async def confluence_compare_versions(
 async def confluence_list_attachments(
     page_id: str,
     limit: int = 25,
+    cursor: str = "",
 ) -> CallToolResult:
     """List attachments on a Confluence page.
 
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         limit: Maximum number of attachments to return (default 25, max 100).
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 100)
+    params: dict = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
-            params={"limit": limit},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -1416,6 +1472,10 @@ async def confluence_list_attachments(
         size = a.get("fileSize", 0)
         size_str = f"{size / 1024:.1f} KB" if size else "?"
         lines.append(f"  [{aid}] \"{title}\" ({media_type}, {size_str})")
+
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
 
     return _text("\n".join(lines))
 
@@ -1743,6 +1803,7 @@ async def confluence_list_spaces(
     limit: int = 25,
     type: str = "",
     status: str = "current",
+    cursor: str = "",
 ) -> CallToolResult:
     """List Confluence spaces.
 
@@ -1750,11 +1811,14 @@ async def confluence_list_spaces(
         limit: Maximum number of spaces to return (default 25, max 250).
         type: Filter by space type — "global" or "personal". Empty for all.
         status: Filter by status — "current" (default) or "archived".
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 250)
     params: dict = {"limit": limit, "status": status}
     if type:
         params["type"] = type
+    if cursor:
+        params["cursor"] = cursor
 
     async with _make_client(timeout=30.0) as client:
         resp = await client.get(
@@ -1776,6 +1840,10 @@ async def confluence_list_spaces(
         key = s.get("key", "?")
         stype = s.get("type", "?")
         lines.append(f"  [{sid}] \"{name}\" (key={key}, type={stype})")
+
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
 
     return _text("\n".join(lines))
 
@@ -2036,6 +2104,7 @@ async def confluence_delete_attachment(
 async def confluence_list_inline_comments(
     page_id: str,
     limit: int = 25,
+    cursor: str = "",
 ) -> CallToolResult:
     """List inline (annotation) comments on a Confluence page.
 
@@ -2045,13 +2114,18 @@ async def confluence_list_inline_comments(
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
         limit: Maximum number of comments to return (default 25, max 100).
+        cursor: Pagination cursor from a previous result.
     """
     limit = min(limit, 100)
+    params: dict = {"limit": limit, "body-format": "atlas_doc_format"}
+    if cursor:
+        params["cursor"] = cursor
+
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         resp = await client.get(
             f"{BASE_URL}/api/v2/pages/{page_id}/inline-comments",
-            params={"limit": limit, "body-format": "atlas_doc_format"},
+            params=params,
             auth=_auth(),
         )
         resp.raise_for_status()
@@ -2078,6 +2152,10 @@ async def confluence_list_inline_comments(
         if selection:
             line += f" (on: \"{selection[:60]}\")"
         lines.append(line)
+
+    next_cursor = _extract_next_cursor(data)
+    if next_cursor:
+        lines.append(f"\nNext cursor: {next_cursor}")
 
     return _text("\n".join(lines))
 

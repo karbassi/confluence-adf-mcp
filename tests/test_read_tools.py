@@ -621,3 +621,44 @@ class TestClearCache:
     async def test_clear_already_empty(self, tmp_cache):
         result = await server.confluence_clear_cache()
         assert "Cache is already empty" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# Pagination cursor support
+# ---------------------------------------------------------------------------
+
+class TestPaginationCursors:
+    @respx.mock
+    async def test_cursor_in_response(self):
+        """When API returns _links.next with cursor, output includes it."""
+        respx.get(f"{BASE}/api/v2/spaces/SP1/pages").mock(
+            return_value=httpx.Response(200, json={
+                "results": [{"id": "1", "title": "Page A", "status": "current"}],
+                "_links": {"next": "/api/v2/spaces/SP1/pages?cursor=abc123&limit=25"},
+            })
+        )
+        result = await server.confluence_list_pages("SP1")
+        text = result.content[0].text
+        assert "Next cursor: abc123" in text
+
+    @respx.mock
+    async def test_cursor_passed_to_api(self):
+        """When cursor parameter is provided, it's sent in the API request."""
+        respx.get(f"{BASE}/api/v2/spaces/SP1/pages").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        await server.confluence_list_pages("SP1", cursor="xyz789")
+        req = respx.calls[0].request
+        assert "cursor=xyz789" in str(req.url)
+
+    @respx.mock
+    async def test_no_cursor_when_absent(self):
+        """When API response has no _links.next, no cursor is shown."""
+        respx.get(f"{BASE}/api/v2/spaces/SP1/pages").mock(
+            return_value=httpx.Response(200, json={
+                "results": [{"id": "1", "title": "Page A", "status": "current"}],
+            })
+        )
+        result = await server.confluence_list_pages("SP1")
+        text = result.content[0].text
+        assert "Next cursor" not in text
