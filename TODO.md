@@ -6,6 +6,13 @@ _No planned items._
 
 ## Done
 
+- [x] Friendly error wrapping for all tools
+- [x] 429 rate-limit retry via transport wrapper
+- [x] Cache management tools (list_cache, clear_cache)
+- [x] Pagination cursor support on list tools
+- [x] .gitignore and .python-version
+- [x] README.md
+
 - [x] Core page CRUD (get, edit, push, create)
 - [x] Find/replace and regex replace
 - [x] Page discovery (search, list, children, ancestors)

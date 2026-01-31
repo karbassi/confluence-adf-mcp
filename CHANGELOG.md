@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Friendly error wrapping — all tools return human-readable messages for HTTP errors (401, 403, 404, 429, 5xx) instead of raw tracebacks
+- 429 rate-limit retry via `_RetryTransport` — automatic retry with `Retry-After` header support
+- `confluence_list_cache` tool to list locally cached pages
+- `confluence_clear_cache` tool to clear specific or all cached pages
+- Pagination cursor support on 8 list tools (`list_pages`, `get_child_pages`, `list_versions`, `list_comments`, `list_inline_comments`, `list_attachments`, `list_spaces`, `search_pages`)
+- `.gitignore` and `.python-version` (3.12)
+- `README.md` with setup instructions, MCP config, and tool reference
 - `confluence_download_attachment` tool to download attachments to local files
 - `confluence_delete_attachment` tool with two-step confirmation guard
 - `confluence_list_inline_comments` tool for annotation comments
