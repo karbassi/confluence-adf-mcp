@@ -78,6 +78,63 @@ async def _get_page_raw(client: httpx.AsyncClient, page_id: str) -> dict:
     return resp.json()
 
 
+def _parse_adf(data: dict) -> dict:
+    """Extract parsed ADF dict from a v2 API page response."""
+    adf_value = data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
+    return json.loads(adf_value)
+
+
+async def _push_page_update(
+    client: httpx.AsyncClient,
+    page_id: str,
+    title: str,
+    adf: dict,
+    current_version: int,
+    message: str = "Updated via MCP",
+) -> dict:
+    """Push a page update with 409 conflict retry."""
+    payload = {
+        "id": page_id,
+        "title": title,
+        "status": "current",
+        "version": {"number": current_version + 1, "message": message},
+        "body": {
+            "representation": "atlas_doc_format",
+            "value": json.dumps(adf),
+        },
+    }
+
+    resp = await client.put(
+        f"{BASE_URL}/api/v2/pages/{page_id}",
+        json=payload,
+        auth=_auth(),
+    )
+
+    if resp.status_code == 409:
+        current = await _get_page_raw(client, page_id)
+        payload["version"]["number"] = current["version"]["number"] + 1
+        resp = await client.put(
+            f"{BASE_URL}/api/v2/pages/{page_id}",
+            json=payload,
+            auth=_auth(),
+        )
+
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _cache_after_push(result: dict, adf: dict, space_id: str = "") -> None:
+    """Update local cache after a successful push."""
+    page_data = {
+        "id": result["id"],
+        "title": result["title"],
+        "version": result["version"]["number"],
+        "spaceId": space_id or result.get("spaceId"),
+        "adf": adf,
+    }
+    _write_cache(result["id"], page_data)
+
+
 @mcp.tool()
 async def confluence_get_page(page_id: str) -> CallToolResult:
     """Fetch a Confluence page and cache it locally for editing.
@@ -92,8 +149,7 @@ async def confluence_get_page(page_id: str) -> CallToolResult:
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
 
-    adf_value = data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
-    adf = json.loads(adf_value)
+    adf = _parse_adf(data)
 
     page_data = {
         "id": data["id"],
@@ -180,42 +236,12 @@ async def confluence_push_page(
     page_id = cached["id"]
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        payload = {
-            "id": page_id,
-            "title": cached["title"],
-            "status": "current",
-            "version": {
-                "number": cached["version"] + 1,
-                "message": version_message or "Updated via MCP",
-            },
-            "body": {
-                "representation": "atlas_doc_format",
-                "value": json.dumps(cached["adf"]),
-            },
-        }
-
-        resp = await client.put(
-            f"{BASE_URL}/api/v2/pages/{page_id}",
-            json=payload,
-            auth=_auth(),
+        result = await _push_page_update(
+            client, page_id, cached["title"], cached["adf"],
+            cached["version"], version_message or "Updated via MCP",
         )
 
-        # Version conflict — refetch current version and retry once
-        if resp.status_code == 409:
-            current = await _get_page_raw(client, page_id)
-            payload["version"]["number"] = current["version"]["number"] + 1
-            resp = await client.put(
-                f"{BASE_URL}/api/v2/pages/{page_id}",
-                json=payload,
-                auth=_auth(),
-            )
-
-        resp.raise_for_status()
-        result = resp.json()
-
-    # Update cache with new version
-    cached["version"] = result["version"]["number"]
-    _write_cache(page_id, cached)
+    _cache_after_push(result, cached["adf"], cached.get("spaceId"))
 
     return _text(f"Pushed \"{result['title']}\" to v{result['version']['number']}.")
 
@@ -243,12 +269,9 @@ async def confluence_find_replace(
     t0 = time.perf_counter()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Get
         page_id = await _resolve_page_id(client, page_id)
         data = await _get_page_raw(client, page_id)
-        adf = json.loads(
-            data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
-        )
+        adf = _parse_adf(data)
 
         # Edit
         count = 0
@@ -276,48 +299,13 @@ async def confluence_find_replace(
             elapsed = (time.perf_counter() - t0) * 1000
             return _text(f"Text not found: \"{find}\" ({elapsed:.0f}ms)")
 
-        # Push
-        payload = {
-            "id": page_id,
-            "title": data["title"],
-            "status": "current",
-            "version": {
-                "number": data["version"]["number"] + 1,
-                "message": version_message or f"Replaced '{find}' with '{replace}'",
-            },
-            "body": {
-                "representation": "atlas_doc_format",
-                "value": json.dumps(adf),
-            },
-        }
-
-        resp = await client.put(
-            f"{BASE_URL}/api/v2/pages/{page_id}",
-            json=payload,
-            auth=_auth(),
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            version_message or f"Replaced '{find}' with '{replace}'",
         )
 
-        if resp.status_code == 409:
-            current = await _get_page_raw(client, page_id)
-            payload["version"]["number"] = current["version"]["number"] + 1
-            resp = await client.put(
-                f"{BASE_URL}/api/v2/pages/{page_id}",
-                json=payload,
-                auth=_auth(),
-            )
-
-        resp.raise_for_status()
-        result = resp.json()
-
-    # Cache the result
-    page_data = {
-        "id": result["id"],
-        "title": result["title"],
-        "version": result["version"]["number"],
-        "spaceId": data.get("spaceId"),
-        "adf": adf,
-    }
-    _write_cache(page_id, page_data)
+    _cache_after_push(result, adf, data.get("spaceId"))
 
     elapsed = (time.perf_counter() - t0) * 1000
 
@@ -399,9 +387,7 @@ async def confluence_replace_mention(
 
         data, users = await asyncio.gather(_fetch_page(), _search_user())
 
-        adf = json.loads(
-            data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
-        )
+        adf = _parse_adf(data)
         if not users:
             elapsed = (time.perf_counter() - t0) * 1000
             return _text(f"User not found: \"{replace_user}\" ({elapsed:.0f}ms)")
@@ -445,52 +431,167 @@ async def confluence_replace_mention(
             elapsed = (time.perf_counter() - t0) * 1000
             return _text(f"No mentions found matching \"{find_user}\" ({elapsed:.0f}ms)")
 
-        # Push
-        payload = {
-            "id": page_id,
-            "title": data["title"],
-            "status": "current",
-            "version": {
-                "number": data["version"]["number"] + 1,
-                "message": f"Replaced @{find_user} mentions with @{new_display}",
-            },
-            "body": {
-                "representation": "atlas_doc_format",
-                "value": json.dumps(adf),
-            },
-        }
-
-        resp = await client.put(
-            f"{BASE_URL}/api/v2/pages/{page_id}",
-            json=payload,
-            auth=_auth(),
+        result = await _push_page_update(
+            client, page_id, data["title"], adf,
+            data["version"]["number"],
+            f"Replaced @{find_user} mentions with @{new_display}",
         )
 
-        if resp.status_code == 409:
-            current = await _get_page_raw(client, page_id)
-            payload["version"]["number"] = current["version"]["number"] + 1
-            resp = await client.put(
-                f"{BASE_URL}/api/v2/pages/{page_id}",
-                json=payload,
-                auth=_auth(),
-            )
-
-        resp.raise_for_status()
-        result = resp.json()
-
-    # Cache the result
-    page_data = {
-        "id": result["id"],
-        "title": result["title"],
-        "version": result["version"]["number"],
-        "spaceId": data.get("spaceId"),
-        "adf": adf,
-    }
-    _write_cache(page_id, page_data)
+    _cache_after_push(result, adf, data.get("spaceId"))
 
     elapsed = (time.perf_counter() - t0) * 1000
 
     return _text(f"Replaced {count} mention(s) of \"{find_user}\" with \"@{new_display}\" in \"{result['title']}\" (v{result['version']['number']}). {elapsed:.0f}ms")
+
+
+@mcp.tool()
+async def confluence_search_pages(
+    query: str,
+    limit: int = 10,
+) -> CallToolResult:
+    """Search Confluence pages using CQL (Confluence Query Language).
+
+    Returns page titles, IDs, and spaces matching the query. Supports CQL operators
+    like AND, OR, ~, =, etc. Simple text is treated as a title/content search.
+
+    Args:
+        query: CQL query string, e.g. 'type=page AND title~"meeting notes"' or just "meeting notes".
+        limit: Maximum number of results to return (default 10, max 50).
+    """
+    limit = min(limit, 50)
+    # If the query doesn't contain CQL operators, wrap it as a text search
+    cql = query if any(op in query for op in ("=", "~", " AND ", " OR ", " IN ")) else f'type=page AND (title~"{query}" OR text~"{query}")'
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{BASE_URL}/rest/api/search",
+            params={"cql": cql, "limit": limit},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    results = data.get("results", [])
+    if not results:
+        return _text("No pages found.")
+
+    lines = [f"Found {len(results)} result(s):"]
+    for r in results:
+        content = r.get("content", {})
+        title = content.get("title", r.get("title", "?"))
+        page_id = content.get("id", "?")
+        space = r.get("resultGlobalContainer", {}).get("title", "?")
+        excerpt = r.get("excerpt", "").strip()
+        if excerpt:
+            # Clean HTML tags from excerpt
+            excerpt = re.sub(r"<[^>]+>", "", excerpt)[:120]
+        line = f"  [{page_id}] \"{title}\" (space: {space})"
+        if excerpt:
+            line += f" — {excerpt}"
+        lines.append(line)
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_list_pages(
+    space_id: str,
+    limit: int = 25,
+    sort: str = "title",
+) -> CallToolResult:
+    """List pages in a Confluence space.
+
+    Args:
+        space_id: The numeric space ID.
+        limit: Maximum number of pages to return (default 25, max 250).
+        sort: Sort order — "title", "-title", "created-date", "-modified-date", etc.
+    """
+    limit = min(limit, 250)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/spaces/{space_id}/pages",
+            params={"limit": limit, "sort": sort},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    pages = data.get("results", [])
+    if not pages:
+        return _text("No pages found in this space.")
+
+    lines = [f"{len(pages)} page(s) in space {space_id}:"]
+    for p in pages:
+        status = p.get("status", "")
+        status_tag = f" [{status}]" if status and status != "current" else ""
+        lines.append(f"  [{p['id']}] \"{p['title']}\"{status_tag}")
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_get_child_pages(
+    page_id: str,
+    limit: int = 25,
+) -> CallToolResult:
+    """Get child pages of a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        limit: Maximum number of children to return (default 25, max 250).
+    """
+    limit = min(limit, 250)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/children",
+            params={"limit": limit},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    children = data.get("results", [])
+    if not children:
+        return _text("No child pages found.")
+
+    lines = [f"{len(children)} child page(s):"]
+    for c in children:
+        lines.append(f"  [{c['id']}] \"{c['title']}\"")
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_get_ancestors(
+    page_id: str,
+) -> CallToolResult:
+    """Get the ancestor (parent) chain of a Confluence page.
+
+    Returns the page hierarchy from the space root down to the immediate parent.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/ancestors",
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    ancestors = data.get("results", [])
+    if not ancestors:
+        return _text("No ancestors — this is a root-level page.")
+
+    lines = [f"{len(ancestors)} ancestor(s) (root → parent):"]
+    for i, a in enumerate(ancestors):
+        indent = "  " * (i + 1)
+        lines.append(f"{indent}[{a['id']}] \"{a['title']}\"")
+
+    return _text("\n".join(lines))
 
 
 @mcp.tool()
