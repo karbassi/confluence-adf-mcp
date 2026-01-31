@@ -247,10 +247,7 @@ def _extract_text_from_adf(node: dict | list, depth: int = 0) -> str:
     if node_type in ("paragraph", "heading"):
         return inner + "\n"
 
-    if node_type == "bulletList":
-        return inner
-
-    if node_type == "orderedList":
+    if node_type in ("bulletList", "orderedList"):
         return inner
 
     if node_type == "listItem":
@@ -344,6 +341,59 @@ def _build_table_row(values: list[str], cell_type: str = "tableCell") -> dict:
     }
 
 
+def _apply_text_replace(root, find: str, replace: str, replace_all: bool) -> int:
+    """Walk ADF tree replacing text occurrences. Returns replacement count."""
+    count = 0
+
+    def _walk(node):
+        nonlocal count
+        if isinstance(node, dict):
+            if node.get("type") == "text" and "text" in node:
+                if find in node["text"]:
+                    if replace_all:
+                        count += node["text"].count(find)
+                        node["text"] = node["text"].replace(find, replace)
+                    elif count == 0:
+                        count = 1
+                        node["text"] = node["text"].replace(find, replace, 1)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(root)
+    return count
+
+
+async def _find_attachment_by_title(client: httpx.AsyncClient, page_id: str, title: str):
+    """Fetch attachments for a page and return the one matching title, or None."""
+    resp = await client.get(
+        f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
+        params={"limit": 250},
+        auth=_auth(),
+    )
+    resp.raise_for_status()
+    for a in resp.json().get("results", []):
+        if a.get("title") == title:
+            return a
+    return None
+
+
+def _simple_adf_doc(text: str) -> dict:
+    """Create a minimal ADF document with a single text paragraph."""
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": text}],
+            }
+        ],
+    }
+
+
 def _extract_next_cursor(data: dict) -> str:
     """Extract pagination cursor from v2 API response _links.next."""
     next_url = data.get("_links", {}).get("next", "")
@@ -418,30 +468,9 @@ async def confluence_edit_page(
     """
     cached = _read_cache(page_id)
 
-    count = 0
-    found = False
+    count = _apply_text_replace(cached["adf"], find, replace, replace_all)
 
-    def _replace_text(node):
-        nonlocal count, found
-        if isinstance(node, dict):
-            if node.get("type") == "text" and "text" in node:
-                if find in node["text"]:
-                    found = True
-                    if replace_all:
-                        count += node["text"].count(find)
-                        node["text"] = node["text"].replace(find, replace)
-                    elif not found or count == 0:
-                        count = 1
-                        node["text"] = node["text"].replace(find, replace, 1)
-            for v in node.values():
-                _replace_text(v)
-        elif isinstance(node, list):
-            for item in node:
-                _replace_text(item)
-
-    _replace_text(cached["adf"])
-
-    if not found:
+    if count == 0:
         return _text(f"Text not found: {find}")
 
     cache_file = _write_cache(page_id, cached)
@@ -509,27 +538,7 @@ async def confluence_find_replace(
         data = await _get_page_raw(client, page_id)
         adf = _parse_adf(data)
 
-        # Edit
-        count = 0
-
-        def _replace_text(node):
-            nonlocal count
-            if isinstance(node, dict):
-                if node.get("type") == "text" and "text" in node:
-                    if find in node["text"]:
-                        if replace_all:
-                            count += node["text"].count(find)
-                            node["text"] = node["text"].replace(find, replace)
-                        elif count == 0:
-                            count = 1
-                            node["text"] = node["text"].replace(find, replace, 1)
-                for v in node.values():
-                    _replace_text(v)
-            elif isinstance(node, list):
-                for item in node:
-                    _replace_text(item)
-
-        _replace_text(adf)
+        count = _apply_text_replace(adf, find, replace, replace_all)
 
         if count == 0:
             elapsed = (time.perf_counter() - t0) * 1000
@@ -1307,24 +1316,13 @@ async def confluence_add_comment(
         body: The comment text (plain text, converted to simple ADF paragraph).
         parent_comment_id: Optional parent comment ID for threaded replies.
     """
-    adf_body = {
-        "type": "doc",
-        "version": 1,
-        "content": [
-            {
-                "type": "paragraph",
-                "content": [{"type": "text", "text": body}],
-            }
-        ],
-    }
-
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
         payload = {
             "pageId": page_id,
             "body": {
                 "representation": "atlas_doc_format",
-                "value": json.dumps(adf_body),
+                "value": json.dumps(_simple_adf_doc(body)),
             },
         }
         if parent_comment_id:
@@ -1689,18 +1687,6 @@ async def confluence_set_restrictions(
     if operation not in ("read", "update"):
         return _text(f"Invalid operation \"{operation}\". Use \"read\" or \"update\".")
 
-    restrictions = []
-    for user_id in users:
-        restrictions.append({
-            "type": "user",
-            "accountId": user_id,
-        })
-    for group_name in groups:
-        restrictions.append({
-            "type": "group",
-            "name": group_name,
-        })
-
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
@@ -2004,21 +1990,7 @@ async def confluence_download_attachment(
     async with _make_client(timeout=60.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
-        # Find the attachment by title
-        resp = await client.get(
-            f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
-            params={"limit": 250},
-            auth=_auth(),
-        )
-        resp.raise_for_status()
-        attachments = resp.json().get("results", [])
-
-        match = None
-        for a in attachments:
-            if a.get("title") == attachment_title:
-                match = a
-                break
-
+        match = await _find_attachment_by_title(client, page_id, attachment_title)
         if not match:
             return _text(f"Attachment \"{attachment_title}\" not found on page {page_id}.")
 
@@ -2058,20 +2030,7 @@ async def confluence_delete_attachment(
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
-        resp = await client.get(
-            f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
-            params={"limit": 250},
-            auth=_auth(),
-        )
-        resp.raise_for_status()
-        attachments = resp.json().get("results", [])
-
-        match = None
-        for a in attachments:
-            if a.get("title") == attachment_title:
-                match = a
-                break
-
+        match = await _find_attachment_by_title(client, page_id, attachment_title)
         if not match:
             return _text(f"Attachment \"{attachment_title}\" not found on page {page_id}.")
 
@@ -2179,17 +2138,6 @@ async def confluence_add_inline_comment(
         text_selection: The exact text on the page to attach the comment to.
         match_index: Which occurrence to annotate (0-based, default 0 = first match).
     """
-    adf_body = {
-        "type": "doc",
-        "version": 1,
-        "content": [
-            {
-                "type": "paragraph",
-                "content": [{"type": "text", "text": body}],
-            }
-        ],
-    }
-
     async with _make_client(timeout=30.0) as client:
         page_id = await _resolve_page_id(client, page_id)
 
@@ -2197,7 +2145,7 @@ async def confluence_add_inline_comment(
             "pageId": page_id,
             "body": {
                 "representation": "atlas_doc_format",
-                "value": json.dumps(adf_body),
+                "value": json.dumps(_simple_adf_doc(body)),
             },
             "inlineCommentProperties": {
                 "textSelection": text_selection,
