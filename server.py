@@ -19,11 +19,160 @@ def _text(msg: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=msg)])
 
 CONFLUENCE_URL = os.environ["CONFLUENCE_URL"]
-CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
-CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
 CACHE_DIR = Path(os.environ.get("CACHE_DIR", ".cache/confluence"))
 
 BASE_URL = CONFLUENCE_URL.rstrip("/")
+
+# --- Auth mode detection ---
+# OAuth mode when all three CONFLUENCE_OAUTH_* vars are set; otherwise basic auth.
+_USE_OAUTH = bool(
+    os.environ.get("CONFLUENCE_OAUTH_CLIENT_ID")
+    and os.environ.get("CONFLUENCE_OAUTH_CLIENT_SECRET")
+    and os.environ.get("CONFLUENCE_OAUTH_REFRESH_TOKEN")
+)
+
+if not _USE_OAUTH:
+    CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
+    CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
+
+# --- OAuth token management ---
+
+_OAUTH_TOKEN_FILE = CACHE_DIR / ".oauth_tokens.json"
+
+
+class OAuthRefreshError(Exception):
+    """Raised when an OAuth token refresh fails."""
+
+
+class _OAuthTokenManager:
+    """Manages OAuth 2.0 access/refresh token lifecycle.
+
+    - Proactively refreshes access tokens 5 minutes before expiry.
+    - Persists rotating refresh tokens to disk.
+    - Uses an asyncio.Lock to prevent concurrent refresh requests.
+    """
+
+    _TOKEN_URL = "https://auth.atlassian.com/oauth/token"
+    _EXPIRY_BUFFER = 300  # refresh 5 min before expiry
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        initial_refresh_token: str,
+        token_file: Path,
+    ):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._token_file = token_file
+        self._lock = asyncio.Lock()
+
+        # Load persisted tokens or fall back to env seed
+        saved = self._load_from_disk()
+        self._refresh_token: str = saved.get("refresh_token", initial_refresh_token)
+        self._access_token: str = saved.get("access_token", "")
+        self._expires_at: float = saved.get("expires_at", 0.0)
+
+    # -- Disk persistence --
+
+    def _load_from_disk(self) -> dict:
+        if self._token_file.exists():
+            try:
+                return json.loads(self._token_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    def _save_to_disk(self) -> None:
+        self._token_file.parent.mkdir(parents=True, exist_ok=True)
+        self._token_file.write_text(
+            json.dumps(
+                {
+                    "refresh_token": self._refresh_token,
+                    "access_token": self._access_token,
+                    "expires_at": self._expires_at,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+
+    # -- Token state --
+
+    @property
+    def access_token(self) -> str:
+        return self._access_token
+
+    def is_expired(self) -> bool:
+        return time.time() >= (self._expires_at - self._EXPIRY_BUFFER)
+
+    # -- Refresh --
+
+    async def ensure_valid(self) -> str:
+        """Return a valid access token, refreshing if needed."""
+        if self._access_token and not self.is_expired():
+            return self._access_token
+
+        async with self._lock:
+            # Double-check after acquiring lock
+            if self._access_token and not self.is_expired():
+                return self._access_token
+            await self._refresh()
+
+        return self._access_token
+
+    async def _refresh(self) -> None:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                self._TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "refresh_token": self._refresh_token,
+                },
+            )
+
+        if resp.status_code != 200:
+            body = resp.text[:300]
+            raise OAuthRefreshError(
+                f"Token refresh failed (HTTP {resp.status_code}): {body}"
+            )
+
+        data = resp.json()
+        self._access_token = data["access_token"]
+        self._expires_at = time.time() + data.get("expires_in", 3600)
+
+        # Rotating refresh token — update if a new one was issued
+        if "refresh_token" in data:
+            self._refresh_token = data["refresh_token"]
+
+        self._save_to_disk()
+
+
+class _OAuthAuth(httpx.Auth):
+    """httpx Auth that injects a Bearer token from the token manager."""
+
+    def __init__(self, manager: _OAuthTokenManager):
+        self._manager = manager
+
+    async def async_auth_flow(self, request):
+        token = await self._manager.ensure_valid()
+        request.headers["Authorization"] = f"Bearer {token}"
+        yield request
+
+
+# --- Module-level auth init ---
+
+_oauth_manager: _OAuthTokenManager | None = None
+
+if _USE_OAUTH:
+    _oauth_manager = _OAuthTokenManager(
+        client_id=os.environ["CONFLUENCE_OAUTH_CLIENT_ID"],
+        client_secret=os.environ["CONFLUENCE_OAUTH_CLIENT_SECRET"],
+        initial_refresh_token=os.environ["CONFLUENCE_OAUTH_REFRESH_TOKEN"],
+        token_file=_OAUTH_TOKEN_FILE,
+    )
 
 
 class _RetryTransport(httpx.AsyncBaseTransport):
@@ -52,7 +201,9 @@ def _make_client(timeout: float = 30.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=timeout, transport=_RetryTransport())
 
 
-def _auth() -> httpx.BasicAuth:
+def _auth() -> httpx.Auth:
+    if _oauth_manager is not None:
+        return _OAuthAuth(_oauth_manager)
     return httpx.BasicAuth(CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN)
 
 
@@ -63,7 +214,10 @@ def _friendly_error(e: httpx.HTTPStatusError) -> str:
     body = e.response.text[:200].strip()
 
     if status == 401:
-        msg = "Authentication failed — check CONFLUENCE_USERNAME and CONFLUENCE_API_TOKEN."
+        if _USE_OAUTH:
+            msg = "Authentication failed — OAuth access token may be invalid or expired."
+        else:
+            msg = "Authentication failed — check CONFLUENCE_USERNAME and CONFLUENCE_API_TOKEN."
     elif status == 403:
         msg = "Permission denied — your account lacks access to this resource."
     elif status == 404:
@@ -82,11 +236,13 @@ def _friendly_error(e: httpx.HTTPStatusError) -> str:
 
 
 def _with_error_handling(func):
-    """Decorator that catches HTTP and file errors, returning friendly messages."""
+    """Decorator that catches HTTP, file, and OAuth errors, returning friendly messages."""
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
+        except OAuthRefreshError as e:
+            return _text(f"OAuth token refresh failed: {e}")
         except httpx.HTTPStatusError as e:
             return _text(_friendly_error(e))
         except FileNotFoundError as e:
