@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -275,6 +276,19 @@ def _build_table_row(values: list[str], cell_type: str = "tableCell") -> dict:
         "type": "tableRow",
         "content": [_build_table_cell(v, cell_type) for v in values],
     }
+
+
+async def _get_page_version_adf(client: httpx.AsyncClient, page_id: str, version: int) -> dict:
+    """Fetch ADF for a specific historical version using the v1 API."""
+    resp = await client.get(
+        f"{BASE_URL}/rest/api/content/{page_id}",
+        params={"version": version, "expand": "body.atlas_doc_format"},
+        auth=_auth(),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    adf_value = data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
+    return json.loads(adf_value)
 
 
 @mcp.tool()
@@ -1141,6 +1155,206 @@ async def confluence_delete_table_row(
     _cache_after_push(result, adf, data.get("spaceId"))
 
     return _text(f"Deleted row {row_index} (\"{deleted_text[:60]}\") (v{result['version']['number']}).")
+
+
+@mcp.tool()
+async def confluence_add_comment(
+    page_id: str,
+    body: str,
+    parent_comment_id: str = "",
+) -> CallToolResult:
+    """Add a footer comment to a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        body: The comment text (plain text, converted to simple ADF paragraph).
+        parent_comment_id: Optional parent comment ID for threaded replies.
+    """
+    adf_body = {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": body}],
+            }
+        ],
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        payload = {
+            "pageId": page_id,
+            "body": {
+                "representation": "atlas_doc_format",
+                "value": json.dumps(adf_body),
+            },
+        }
+        if parent_comment_id:
+            payload["parentCommentId"] = parent_comment_id
+
+        resp = await client.post(
+            f"{BASE_URL}/api/v2/footer-comments",
+            json=payload,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    comment_id = result.get("id", "?")
+    return _text(f"Added comment (id={comment_id}) on page {page_id}.")
+
+
+@mcp.tool()
+async def confluence_list_comments(
+    page_id: str,
+    limit: int = 25,
+) -> CallToolResult:
+    """List footer comments on a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        limit: Maximum number of comments to return (default 25, max 100).
+    """
+    limit = min(limit, 100)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/footer-comments",
+            params={"limit": limit, "body-format": "atlas_doc_format"},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    comments = data.get("results", [])
+    if not comments:
+        return _text("No comments on this page.")
+
+    lines = [f"{len(comments)} comment(s):"]
+    for c in comments:
+        cid = c.get("id", "?")
+        author = c.get("authorId", "?")
+        created = c.get("createdAt", "?")
+        body_adf = json.loads(c.get("body", {}).get("atlas_doc_format", {}).get("value", "{}"))
+        text = _extract_text_from_adf(body_adf).strip()[:200]
+        lines.append(f"  [{cid}] by {author} at {created}: {text}")
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_compare_versions(
+    page_id: str,
+    version_a: int,
+    version_b: int,
+) -> CallToolResult:
+    """Compare two versions of a Confluence page as a unified text diff.
+
+    Fetches the ADF for both versions, extracts plaintext, and produces a
+    unified diff showing what changed.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        version_a: The "before" version number.
+        version_b: The "after" version number.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        adf_a, adf_b = await asyncio.gather(
+            _get_page_version_adf(client, page_id, version_a),
+            _get_page_version_adf(client, page_id, version_b),
+        )
+
+    text_a = _extract_text_from_adf(adf_a).splitlines(keepends=True)
+    text_b = _extract_text_from_adf(adf_b).splitlines(keepends=True)
+
+    diff = list(difflib.unified_diff(
+        text_a, text_b,
+        fromfile=f"v{version_a}",
+        tofile=f"v{version_b}",
+    ))
+
+    if not diff:
+        return _text(f"No text differences between v{version_a} and v{version_b}.")
+
+    return _text("".join(diff))
+
+
+@mcp.tool()
+async def confluence_list_attachments(
+    page_id: str,
+    limit: int = 25,
+) -> CallToolResult:
+    """List attachments on a Confluence page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        limit: Maximum number of attachments to return (default 25, max 100).
+    """
+    limit = min(limit, 100)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
+            params={"limit": limit},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    attachments = data.get("results", [])
+    if not attachments:
+        return _text("No attachments on this page.")
+
+    lines = [f"{len(attachments)} attachment(s):"]
+    for a in attachments:
+        aid = a.get("id", "?")
+        title = a.get("title", "?")
+        media_type = a.get("mediaType", "?")
+        size = a.get("fileSize", 0)
+        size_str = f"{size / 1024:.1f} KB" if size else "?"
+        lines.append(f"  [{aid}] \"{title}\" ({media_type}, {size_str})")
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_get_contributors(
+    page_id: str,
+) -> CallToolResult:
+    """Get unique contributors to a Confluence page from its version history.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/versions",
+            params={"limit": 50},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    versions = data.get("results", [])
+    if not versions:
+        return _text("No version history found.")
+
+    # Extract unique authors preserving first-seen order
+    seen = {}
+    for v in versions:
+        author_id = v.get("authorId", "")
+        if author_id and author_id not in seen:
+            seen[author_id] = v.get("number", "?")
+
+    lines = [f"{len(seen)} contributor(s):"]
+    for author_id, first_version in seen.items():
+        lines.append(f"  {author_id} (first seen in v{first_version})")
+
+    return _text("\n".join(lines))
 
 
 @mcp.tool()
