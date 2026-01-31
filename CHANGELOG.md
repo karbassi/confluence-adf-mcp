@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Destructive tools (archive, move) require `confirm=True` to execute
+- Extracted `_apply_text_replace` helper, eliminating duplicate `_replace_text` closures in `edit_page` and `find_replace`
+- Extracted `_find_attachment_by_title` helper, eliminating duplicate attachment lookup in `download_attachment` and `delete_attachment`
+- Extracted `_simple_adf_doc` helper, eliminating duplicate ADF body construction in `add_comment` and `add_inline_comment`
+- Combined duplicate `bulletList`/`orderedList` branches in `_extract_text_from_adf`
+- Removed dead `restrictions` list in `confluence_set_restrictions`
+- Reused `_parse_adf` in `_get_page_version_adf` instead of duplicating parsing logic
+- Replaced trivial wrapper functions with direct `asyncio.gather` calls in `move_page`
+- Simplified `copy_page` destination payload construction
 
 ## [0.1.0] - 2025-01-01
 
