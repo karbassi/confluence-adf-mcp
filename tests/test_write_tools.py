@@ -744,6 +744,259 @@ class TestRemoveLabel:
 # confluence_archive_page
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# confluence_download_attachment
+# ---------------------------------------------------------------------------
+
+class TestDownloadAttachment:
+    @respx.mock
+    async def test_download_success(self, tmp_path):
+        respx.get(f"{BASE}/api/v2/pages/1/attachments").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "a1", "title": "report.pdf", "mediaType": "application/pdf", "fileSize": 1024},
+            ]})
+        )
+        respx.get(f"{BASE}/rest/api/content/a1/download").mock(
+            return_value=httpx.Response(200, content=b"PDF bytes here")
+        )
+        save_path = str(tmp_path / "out" / "report.pdf")
+        result = await server.confluence_download_attachment("1", "report.pdf", save_path)
+        text = result.content[0].text
+        assert "Downloaded" in text
+        assert "report.pdf" in text
+        from pathlib import Path
+        assert Path(save_path).read_bytes() == b"PDF bytes here"
+
+    @respx.mock
+    async def test_attachment_not_found(self):
+        respx.get(f"{BASE}/api/v2/pages/1/attachments").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await server.confluence_download_attachment("1", "missing.txt", "/tmp/x")
+        assert "not found" in result.content[0].text
+
+    @respx.mock
+    async def test_creates_parent_dirs(self, tmp_path):
+        respx.get(f"{BASE}/api/v2/pages/1/attachments").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "a1", "title": "f.txt"},
+            ]})
+        )
+        respx.get(f"{BASE}/rest/api/content/a1/download").mock(
+            return_value=httpx.Response(200, content=b"data")
+        )
+        save_path = str(tmp_path / "deep" / "nested" / "f.txt")
+        await server.confluence_download_attachment("1", "f.txt", save_path)
+        from pathlib import Path
+        assert Path(save_path).exists()
+
+
+# ---------------------------------------------------------------------------
+# confluence_delete_attachment
+# ---------------------------------------------------------------------------
+
+class TestDeleteAttachment:
+    @respx.mock
+    async def test_preview_without_confirm(self):
+        respx.get(f"{BASE}/api/v2/pages/1/attachments").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "a1", "title": "old.pdf", "mediaType": "application/pdf", "fileSize": 2048},
+            ]})
+        )
+        result = await server.confluence_delete_attachment("1", "old.pdf")
+        text = result.content[0].text
+        assert "DELETE PREVIEW" in text
+        assert "old.pdf" in text
+        assert "confirm=True" in text
+
+    @respx.mock
+    async def test_confirm_deletes(self):
+        respx.get(f"{BASE}/api/v2/pages/1/attachments").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "a1", "title": "old.pdf", "mediaType": "application/pdf", "fileSize": 2048},
+            ]})
+        )
+        respx.delete(f"{BASE}/rest/api/content/a1").mock(
+            return_value=httpx.Response(204)
+        )
+        result = await server.confluence_delete_attachment("1", "old.pdf", confirm=True)
+        text = result.content[0].text
+        assert "Deleted" in text
+        assert "old.pdf" in text
+
+    @respx.mock
+    async def test_attachment_not_found(self):
+        respx.get(f"{BASE}/api/v2/pages/1/attachments").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await server.confluence_delete_attachment("1", "nope.txt", confirm=True)
+        assert "not found" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# confluence_add_inline_comment
+# ---------------------------------------------------------------------------
+
+class TestAddInlineComment:
+    @respx.mock
+    async def test_success(self):
+        respx.post(f"{BASE}/api/v2/inline-comments").mock(
+            return_value=httpx.Response(200, json={"id": "ic1"})
+        )
+        result = await server.confluence_add_inline_comment("1", "Fix this", "some text")
+        text = result.content[0].text
+        assert "ic1" in text
+        assert "some text" in text
+        body = json.loads(respx.calls[0].request.content)
+        assert body["inlineCommentProperties"]["textSelection"] == "some text"
+
+    @respx.mock
+    async def test_match_index(self):
+        respx.post(f"{BASE}/api/v2/inline-comments").mock(
+            return_value=httpx.Response(200, json={"id": "ic2"})
+        )
+        await server.confluence_add_inline_comment("1", "Note", "word", match_index=2)
+        body = json.loads(respx.calls[0].request.content)
+        assert body["inlineCommentProperties"]["textSelectionMatchIndex"] == 2
+        assert body["inlineCommentProperties"]["textSelectionMatchCount"] == 3
+
+    @respx.mock
+    async def test_adf_wrapping(self):
+        respx.post(f"{BASE}/api/v2/inline-comments").mock(
+            return_value=httpx.Response(200, json={"id": "ic3"})
+        )
+        await server.confluence_add_inline_comment("1", "Comment text", "sel")
+        body = json.loads(respx.calls[0].request.content)
+        adf_value = json.loads(body["body"]["value"])
+        assert adf_value["type"] == "doc"
+        assert adf_value["content"][0]["content"][0]["text"] == "Comment text"
+
+
+# ---------------------------------------------------------------------------
+# confluence_set_page_property
+# ---------------------------------------------------------------------------
+
+class TestSetPageProperty:
+    @respx.mock
+    async def test_create_new(self):
+        respx.get(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        respx.post(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"key": "status", "value": "done", "version": {"number": 1}})
+        )
+        result = await server.confluence_set_page_property("1", "status", '"done"')
+        text = result.content[0].text
+        assert "Created" in text
+        assert "status" in text
+
+    @respx.mock
+    async def test_update_existing(self):
+        respx.get(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"id": "p1", "key": "status", "value": "draft", "version": {"number": 2}},
+            ]})
+        )
+        respx.put(f"{BASE}/api/v2/pages/1/properties/p1").mock(
+            return_value=httpx.Response(200, json={"key": "status", "value": "done", "version": {"number": 3}})
+        )
+        result = await server.confluence_set_page_property("1", "status", '"done"')
+        text = result.content[0].text
+        assert "Updated" in text
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["version"]["number"] == 3
+
+    @respx.mock
+    async def test_json_object_value(self):
+        respx.get(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        respx.post(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"key": "meta", "value": {"a": 1}, "version": {"number": 1}})
+        )
+        await server.confluence_set_page_property("1", "meta", '{"a": 1}')
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["value"] == {"a": 1}
+
+    @respx.mock
+    async def test_plain_string_fallback(self):
+        respx.get(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        respx.post(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"key": "note", "value": "hello", "version": {"number": 1}})
+        )
+        await server.confluence_set_page_property("1", "note", "hello")
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["value"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# confluence_copy_page
+# ---------------------------------------------------------------------------
+
+class TestCopyPage:
+    @respx.mock
+    async def test_copy_default_title(self):
+        page = make_page_response(title="Original")
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        respx.post(f"{BASE}/rest/api/content/12345/copy").mock(
+            return_value=httpx.Response(200, json={"id": "99"})
+        )
+        result = await server.confluence_copy_page("12345")
+        text = result.content[0].text
+        assert "Copy of Original" in text
+        assert "id=99" in text
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["pageTitle"] == "Copy of Original"
+
+    @respx.mock
+    async def test_copy_custom_title(self):
+        page = make_page_response(title="Original")
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        respx.post(f"{BASE}/rest/api/content/12345/copy").mock(
+            return_value=httpx.Response(200, json={"id": "100"})
+        )
+        result = await server.confluence_copy_page("12345", title="My Copy")
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["pageTitle"] == "My Copy"
+
+    @respx.mock
+    async def test_copy_to_destination(self):
+        page = make_page_response()
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        respx.post(f"{BASE}/rest/api/content/12345/copy").mock(
+            return_value=httpx.Response(200, json={"id": "101"})
+        )
+        await server.confluence_copy_page("12345", destination_parent_id="50")
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["destination"] == {"type": "parent_page", "value": "50"}
+
+    @respx.mock
+    async def test_copy_options(self):
+        page = make_page_response()
+        respx.get(f"{BASE}/api/v2/pages/12345").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        respx.post(f"{BASE}/rest/api/content/12345/copy").mock(
+            return_value=httpx.Response(200, json={"id": "102"})
+        )
+        await server.confluence_copy_page("12345", copy_labels=False, copy_attachments=False)
+        body = json.loads(respx.calls[-1].request.content)
+        assert body["copyLabels"] is False
+        assert body["copyAttachments"] is False
+
+
+# ---------------------------------------------------------------------------
+# confluence_archive_page
+# ---------------------------------------------------------------------------
+
 class TestArchivePage:
     @respx.mock
     async def test_preview_without_confirm(self):

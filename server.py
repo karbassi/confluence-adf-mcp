@@ -1810,5 +1810,423 @@ async def confluence_move_page(
     return _text(msg)
 
 
+@mcp.tool()
+async def confluence_download_attachment(
+    page_id: str,
+    attachment_title: str,
+    save_path: str,
+) -> CallToolResult:
+    """Download an attachment from a Confluence page to a local file.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        attachment_title: The filename of the attachment to download (e.g. "report.pdf").
+        save_path: Local file path to save the downloaded file.
+    """
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        # Find the attachment by title
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
+            params={"limit": 250},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        attachments = resp.json().get("results", [])
+
+        match = None
+        for a in attachments:
+            if a.get("title") == attachment_title:
+                match = a
+                break
+
+        if not match:
+            return _text(f"Attachment \"{attachment_title}\" not found on page {page_id}.")
+
+        # Download via v1 download link
+        download_url = f"{BASE_URL}/rest/api/content/{match['id']}/download"
+        resp = await client.get(download_url, auth=_auth(), follow_redirects=True)
+        resp.raise_for_status()
+
+    dest = Path(save_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(resp.content)
+
+    size_kb = len(resp.content) / 1024
+    return _text(f"Downloaded \"{attachment_title}\" ({size_kb:.1f} KB) to {dest.resolve()}")
+
+
+@mcp.tool()
+async def confluence_delete_attachment(
+    page_id: str,
+    attachment_title: str,
+    confirm: bool = False,
+) -> CallToolResult:
+    """Delete an attachment from a Confluence page.
+
+    DESTRUCTIVE: This permanently removes the attachment. By default this tool
+    runs in preview mode — call with confirm=True to actually delete.
+
+    You MUST show the preview to the user and get their explicit approval before
+    calling again with confirm=True.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        attachment_title: The filename of the attachment to delete.
+        confirm: Must be True to actually delete. False (default) shows a preview.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/attachments",
+            params={"limit": 250},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        attachments = resp.json().get("results", [])
+
+        match = None
+        for a in attachments:
+            if a.get("title") == attachment_title:
+                match = a
+                break
+
+        if not match:
+            return _text(f"Attachment \"{attachment_title}\" not found on page {page_id}.")
+
+        att_id = match.get("id", "?")
+        media_type = match.get("mediaType", "?")
+        size = match.get("fileSize", 0)
+        size_str = f"{size / 1024:.1f} KB" if size else "?"
+
+        if not confirm:
+            return _text(
+                f"⚠ DELETE PREVIEW — This will permanently delete:\n"
+                f"  File:  \"{attachment_title}\" (id={att_id})\n"
+                f"  Type:  {media_type}\n"
+                f"  Size:  {size_str}\n"
+                f"  Page:  {page_id}\n\n"
+                f"To proceed, call again with confirm=True."
+            )
+
+        resp = await client.delete(
+            f"{BASE_URL}/rest/api/content/{att_id}",
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+
+    return _text(f"Deleted attachment \"{attachment_title}\" (id={att_id}) from page {page_id}.")
+
+
+@mcp.tool()
+async def confluence_list_inline_comments(
+    page_id: str,
+    limit: int = 25,
+) -> CallToolResult:
+    """List inline (annotation) comments on a Confluence page.
+
+    These are comments anchored to specific text selections, as opposed to
+    footer comments which appear at the bottom of the page.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        limit: Maximum number of comments to return (default 25, max 100).
+    """
+    limit = min(limit, 100)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/inline-comments",
+            params={"limit": limit, "body-format": "atlas_doc_format"},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    comments = data.get("results", [])
+    if not comments:
+        return _text("No inline comments on this page.")
+
+    lines = [f"{len(comments)} inline comment(s):"]
+    for c in comments:
+        cid = c.get("id", "?")
+        author = c.get("authorId", "?")
+        created = c.get("createdAt", "?")
+        props = c.get("properties", {}).get("inline-marker-ref", {})
+        selection = ""
+        if isinstance(props, dict):
+            selection = props.get("value", "")
+        body_adf = json.loads(
+            c.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
+        )
+        text = _extract_text_from_adf(body_adf).strip()[:200]
+        line = f"  [{cid}] by {author} at {created}: {text}"
+        if selection:
+            line += f" (on: \"{selection[:60]}\")"
+        lines.append(line)
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_add_inline_comment(
+    page_id: str,
+    body: str,
+    text_selection: str,
+    match_index: int = 0,
+) -> CallToolResult:
+    """Add an inline (annotation) comment anchored to specific text on a page.
+
+    The comment is attached to the first (or Nth) occurrence of text_selection
+    found in the page body.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        body: The comment text (plain text, converted to ADF paragraph).
+        text_selection: The exact text on the page to attach the comment to.
+        match_index: Which occurrence to annotate (0-based, default 0 = first match).
+    """
+    adf_body = {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": body}],
+            }
+        ],
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        payload = {
+            "pageId": page_id,
+            "body": {
+                "representation": "atlas_doc_format",
+                "value": json.dumps(adf_body),
+            },
+            "inlineCommentProperties": {
+                "textSelection": text_selection,
+                "textSelectionMatchCount": match_index + 1,
+                "textSelectionMatchIndex": match_index,
+            },
+        }
+
+        resp = await client.post(
+            f"{BASE_URL}/api/v2/inline-comments",
+            json=payload,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    comment_id = result.get("id", "?")
+    return _text(f"Added inline comment (id={comment_id}) on \"{text_selection[:60]}\" in page {page_id}.")
+
+
+@mcp.tool()
+async def confluence_get_page_properties(
+    page_id: str,
+    limit: int = 25,
+) -> CallToolResult:
+    """Get content properties on a Confluence page.
+
+    Content properties are key-value metadata pairs stored on pages.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        limit: Maximum number of properties to return (default 25, max 100).
+    """
+    limit = min(limit, 100)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/properties",
+            params={"limit": limit},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    props = data.get("results", [])
+    if not props:
+        return _text("No properties on this page.")
+
+    lines = [f"{len(props)} propert(ies):"]
+    for p in props:
+        key = p.get("key", "?")
+        value = p.get("value", "")
+        version = p.get("version", {}).get("number", "?")
+        # Truncate long values
+        val_str = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+        if len(val_str) > 120:
+            val_str = val_str[:117] + "..."
+        lines.append(f"  {key} = {val_str} (v{version})")
+
+    return _text("\n".join(lines))
+
+
+@mcp.tool()
+async def confluence_set_page_property(
+    page_id: str,
+    key: str,
+    value: str,
+) -> CallToolResult:
+    """Set a content property on a Confluence page.
+
+    Creates the property if it doesn't exist, or updates it if it does.
+    The value is stored as a JSON string.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        key: The property key (e.g. "status", "priority").
+        value: The property value as a JSON string (e.g. '"done"', '{"score": 5}').
+    """
+    try:
+        parsed_value = json.loads(value)
+    except json.JSONDecodeError:
+        # Treat as plain string
+        parsed_value = value
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+
+        # Check if property already exists
+        resp = await client.get(
+            f"{BASE_URL}/api/v2/pages/{page_id}/properties",
+            params={"limit": 100},
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        existing = resp.json().get("results", [])
+
+        existing_prop = None
+        for p in existing:
+            if p.get("key") == key:
+                existing_prop = p
+                break
+
+        if existing_prop:
+            # Update existing
+            prop_id = existing_prop["id"]
+            current_version = existing_prop.get("version", {}).get("number", 1)
+            payload = {
+                "key": key,
+                "value": parsed_value,
+                "version": {"number": current_version + 1},
+            }
+            resp = await client.put(
+                f"{BASE_URL}/api/v2/pages/{page_id}/properties/{prop_id}",
+                json=payload,
+                auth=_auth(),
+            )
+        else:
+            # Create new
+            payload = {
+                "key": key,
+                "value": parsed_value,
+            }
+            resp = await client.post(
+                f"{BASE_URL}/api/v2/pages/{page_id}/properties",
+                json=payload,
+                auth=_auth(),
+            )
+
+        resp.raise_for_status()
+        result = resp.json()
+
+    action = "Updated" if existing_prop else "Created"
+    ver = result.get("version", {}).get("number", "?")
+    return _text(f"{action} property \"{key}\" on page {page_id} (v{ver}).")
+
+
+@mcp.tool()
+async def confluence_copy_page(
+    page_id: str,
+    title: str = "",
+    destination_parent_id: str = "",
+    copy_labels: bool = True,
+    copy_attachments: bool = True,
+) -> CallToolResult:
+    """Copy a Confluence page.
+
+    Creates a duplicate of the page, optionally under a different parent.
+
+    Args:
+        page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
+        title: Title for the copy. Defaults to "Copy of {original title}".
+        destination_parent_id: Parent page ID for the copy. Empty = same parent.
+        copy_labels: Whether to copy labels (default True).
+        copy_attachments: Whether to copy attachments (default True).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page_id = await _resolve_page_id(client, page_id)
+        data = await _get_page_raw(client, page_id)
+
+        original_title = data["title"]
+        copy_title = title or f"Copy of {original_title}"
+
+        destination = {"type": "parent_page", "value": destination_parent_id} if destination_parent_id else None
+
+        payload = {
+            "copyAttachments": copy_attachments,
+            "copyLabels": copy_labels,
+            "copyPermissions": False,
+            "destination": destination,
+            "pageTitle": copy_title,
+        }
+        # Remove None destination
+        if destination is None:
+            del payload["destination"]
+
+        resp = await client.post(
+            f"{BASE_URL}/rest/api/content/{page_id}/copy",
+            json=payload,
+            auth=_auth(),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    new_id = result.get("id", "?")
+    return _text(f"Copied \"{original_title}\" → \"{copy_title}\" (id={new_id}).")
+
+
+@mcp.tool()
+async def confluence_get_user(
+    account_id: str,
+) -> CallToolResult:
+    """Get user details by account ID.
+
+    Resolves an account ID (as seen in version history, comments, etc.)
+    to a display name, email, and profile info.
+
+    Args:
+        account_id: The Confluence/Atlassian account ID.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{BASE_URL}/rest/api/user",
+            params={"accountId": account_id},
+            auth=_auth(),
+        )
+        if resp.status_code == 404:
+            return _text(f"User not found: {account_id}")
+        resp.raise_for_status()
+        user = resp.json()
+
+    display_name = user.get("displayName", "?")
+    account_type = user.get("accountType", "?")
+    email = user.get("email", "")
+
+    info = f"\"{display_name}\" (type={account_type}, id={account_id})"
+    if email:
+        info += f" — {email}"
+
+    return _text(info)
+
+
 if __name__ == "__main__":
     mcp.run()

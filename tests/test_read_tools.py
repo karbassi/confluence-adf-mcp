@@ -446,6 +446,113 @@ class TestListSpaces:
 # confluence_get_contributors
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# confluence_list_inline_comments
+# ---------------------------------------------------------------------------
+
+class TestListInlineComments:
+    @respx.mock
+    async def test_comments_listed(self):
+        comment_adf = make_adf([make_paragraph("Fix this typo")])
+        respx.get(f"{BASE}/api/v2/pages/1/inline-comments").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {
+                    "id": "ic1",
+                    "authorId": "u1",
+                    "createdAt": "2025-01-01",
+                    "body": {"atlas_doc_format": {"value": json.dumps(comment_adf)}},
+                    "properties": {"inline-marker-ref": {"value": "some text"}},
+                },
+            ]})
+        )
+        result = await server.confluence_list_inline_comments("1")
+        text = result.content[0].text
+        assert "1 inline comment(s)" in text
+        assert "Fix this typo" in text
+        assert "some text" in text
+
+    @respx.mock
+    async def test_no_inline_comments(self):
+        respx.get(f"{BASE}/api/v2/pages/1/inline-comments").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await server.confluence_list_inline_comments("1")
+        assert "No inline comments" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# confluence_get_page_properties
+# ---------------------------------------------------------------------------
+
+class TestGetPageProperties:
+    @respx.mock
+    async def test_properties_listed(self):
+        respx.get(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"results": [
+                {"key": "status", "value": "reviewed", "version": {"number": 1}},
+                {"key": "score", "value": {"total": 42}, "version": {"number": 3}},
+            ]})
+        )
+        result = await server.confluence_get_page_properties("1")
+        text = result.content[0].text
+        assert "2 propert(ies)" in text
+        assert "status = reviewed" in text
+        assert "score" in text
+
+    @respx.mock
+    async def test_no_properties(self):
+        respx.get(f"{BASE}/api/v2/pages/1/properties").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await server.confluence_get_page_properties("1")
+        assert "No properties" in result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# confluence_get_user
+# ---------------------------------------------------------------------------
+
+class TestGetUser:
+    @respx.mock
+    async def test_user_found(self):
+        respx.get(f"{BASE}/rest/api/user").mock(
+            return_value=httpx.Response(200, json={
+                "displayName": "Alice Smith",
+                "accountType": "atlassian",
+                "email": "alice@example.com",
+            })
+        )
+        result = await server.confluence_get_user("abc123")
+        text = result.content[0].text
+        assert "Alice Smith" in text
+        assert "alice@example.com" in text
+
+    @respx.mock
+    async def test_user_not_found(self):
+        respx.get(f"{BASE}/rest/api/user").mock(
+            return_value=httpx.Response(404)
+        )
+        result = await server.confluence_get_user("unknown")
+        assert "User not found" in result.content[0].text
+
+    @respx.mock
+    async def test_user_without_email(self):
+        respx.get(f"{BASE}/rest/api/user").mock(
+            return_value=httpx.Response(200, json={
+                "displayName": "Bot",
+                "accountType": "app",
+            })
+        )
+        result = await server.confluence_get_user("bot-id")
+        text = result.content[0].text
+        assert "Bot" in text
+        assert "app" in text
+
+
+# ---------------------------------------------------------------------------
+# confluence_get_contributors
+# ---------------------------------------------------------------------------
+
 class TestGetContributors:
     @respx.mock
     async def test_unique_authors(self):
