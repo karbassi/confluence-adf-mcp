@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - OAuth 2.0 (3LO) token refresh support alongside existing basic auth — auto-detected from environment variables, with proactive token refresh, rotating refresh token persistence, and 18 new tests
+- OAuth setup documentation in README with env vars, auto-detection, token file location, and MCP config examples
 - Friendly error wrapping — all tools return human-readable messages for HTTP errors (401, 403, 404, 429, 5xx) instead of raw tracebacks
 - 429 rate-limit retry via `_RetryTransport` — automatic retry with `Retry-After` header support
 - `confluence_list_cache` tool to list locally cached pages
@@ -42,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Reused `_parse_adf` in `_get_page_version_adf` instead of duplicating parsing logic
 - Replaced trivial wrapper functions with direct `asyncio.gather` calls in `move_page`
 - Simplified `copy_page` destination payload construction
+
+### Fixed
+
+- Token file permissions restricted to 0o600 (owner-only) to prevent credential exposure
+- OAuth error messages sanitized to exclude response body from token endpoint
 
 ## [0.1.0] - 2025-01-01
 
