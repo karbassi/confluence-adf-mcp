@@ -19,6 +19,22 @@ export CONFLUENCE_API_TOKEN="your-api-token"
 
 Generate an API token at https://id.atlassian.com/manage-profile/security/api-tokens.
 
+### OAuth 2.0 (optional)
+
+Instead of basic auth, you can use OAuth 2.0 (3LO). Set these three environment variables:
+
+```bash
+export CONFLUENCE_OAUTH_CLIENT_ID="your-oauth-client-id"
+export CONFLUENCE_OAUTH_CLIENT_SECRET="your-oauth-client-secret"
+export CONFLUENCE_OAUTH_REFRESH_TOKEN="your-initial-refresh-token"
+```
+
+If all three are set, the server uses OAuth automatically; otherwise it falls back to basic auth (`CONFLUENCE_USERNAME` / `CONFLUENCE_API_TOKEN`).
+
+Rotating refresh tokens are persisted to `.cache/confluence/.oauth_tokens.json` so the server can restart without re-authorizing.
+
+See [Atlassian OAuth 2.0 (3LO) documentation](https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/) for how to create an OAuth app and obtain the initial refresh token.
+
 ### Install and run
 
 ```bash
@@ -30,6 +46,8 @@ uv run server.py
 
 Add to `.claude/settings.json`:
 
+Basic auth:
+
 ```json
 {
   "mcpServers": {
@@ -40,6 +58,25 @@ Add to `.claude/settings.json`:
         "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
         "CONFLUENCE_USERNAME": "you@example.com",
         "CONFLUENCE_API_TOKEN": "your-api-token"
+      }
+    }
+  }
+}
+```
+
+OAuth 2.0:
+
+```json
+{
+  "mcpServers": {
+    "confluence-adf": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/confluence-adf-mcp", "server.py"],
+      "env": {
+        "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
+        "CONFLUENCE_OAUTH_CLIENT_ID": "your-oauth-client-id",
+        "CONFLUENCE_OAUTH_CLIENT_SECRET": "your-oauth-client-secret",
+        "CONFLUENCE_OAUTH_REFRESH_TOKEN": "your-initial-refresh-token"
       }
     }
   }

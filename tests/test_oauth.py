@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import stat
 import time
 
 import httpx
@@ -73,6 +75,20 @@ class TestOAuthTokenManager:
         assert saved["access_token"] == "at-123"
         assert saved["refresh_token"] == "rt-456"
         assert saved["expires_at"] == 9999999999.0
+
+    def test_save_to_disk_permissions(self, tmp_path):
+        """Token file is created with 0o600 (owner-only) permissions."""
+        token_file = tmp_path / "tokens.json"
+        mgr = server._OAuthTokenManager(
+            client_id="cid",
+            client_secret="csec",
+            initial_refresh_token="rt",
+            token_file=token_file,
+        )
+        mgr._save_to_disk()
+
+        mode = stat.S_IMODE(os.stat(token_file).st_mode)
+        assert mode == 0o600
 
     def test_is_expired_with_buffer(self, tmp_path):
         """Token is considered expired within the 5-minute buffer."""
@@ -211,6 +227,27 @@ class TestOAuthRefresh:
 
         with pytest.raises(server.OAuthRefreshError, match="500"):
             await mgr.ensure_valid()
+
+    @respx.mock
+    async def test_refresh_error_excludes_body(self, tmp_path):
+        """OAuthRefreshError message does NOT contain the response body."""
+        mgr = server._OAuthTokenManager(
+            client_id="cid",
+            client_secret="csec",
+            initial_refresh_token="rt",
+            token_file=tmp_path / "tokens.json",
+        )
+
+        secret_body = "secret_internal_detail_xyz"
+        respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(400, text=secret_body)
+        )
+
+        with pytest.raises(server.OAuthRefreshError) as exc_info:
+            await mgr.ensure_valid()
+
+        assert secret_body not in str(exc_info.value)
+        assert "400" in str(exc_info.value)
 
     @respx.mock
     async def test_concurrent_refresh_dedup(self, tmp_path):

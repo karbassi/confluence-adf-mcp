@@ -85,17 +85,17 @@ class _OAuthTokenManager:
 
     def _save_to_disk(self) -> None:
         self._token_file.parent.mkdir(parents=True, exist_ok=True)
-        self._token_file.write_text(
-            json.dumps(
-                {
-                    "refresh_token": self._refresh_token,
-                    "access_token": self._access_token,
-                    "expires_at": self._expires_at,
-                },
-                indent=2,
-            )
-            + "\n"
-        )
+        content = json.dumps(
+            {
+                "refresh_token": self._refresh_token,
+                "access_token": self._access_token,
+                "expires_at": self._expires_at,
+            },
+            indent=2,
+        ) + "\n"
+        fd = os.open(str(self._token_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
 
     # -- Token state --
 
@@ -134,9 +134,8 @@ class _OAuthTokenManager:
             )
 
         if resp.status_code != 200:
-            body = resp.text[:300]
             raise OAuthRefreshError(
-                f"Token refresh failed (HTTP {resp.status_code}): {body}"
+                f"Token refresh failed (HTTP {resp.status_code})"
             )
 
         data = resp.json()
