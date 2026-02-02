@@ -44,40 +44,14 @@ uv run server.py
 
 ### Claude Code configuration
 
-Add to `.claude/settings.json`:
-
-Basic auth:
+Copy `.env.example` to `.env` and fill in your credentials, then add to `.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "confluence-adf": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/confluence-adf-mcp", "server.py"],
-      "env": {
-        "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
-        "CONFLUENCE_USERNAME": "you@example.com",
-        "CONFLUENCE_API_TOKEN": "your-api-token"
-      }
-    }
-  }
-}
-```
-
-OAuth 2.0:
-
-```json
-{
-  "mcpServers": {
-    "confluence-adf": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/confluence-adf-mcp", "server.py"],
-      "env": {
-        "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
-        "CONFLUENCE_OAUTH_CLIENT_ID": "your-oauth-client-id",
-        "CONFLUENCE_OAUTH_CLIENT_SECRET": "your-oauth-client-secret",
-        "CONFLUENCE_OAUTH_REFRESH_TOKEN": "your-initial-refresh-token"
-      }
+      "args": ["run", "--env-file", ".env", "--directory", "/path/to/confluence-adf-mcp", "server.py"]
     }
   }
 }
