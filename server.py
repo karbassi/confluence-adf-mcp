@@ -9,7 +9,10 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+load_dotenv()
 from mcp.types import CallToolResult, TextContent
 
 mcp = FastMCP("confluence-adf")

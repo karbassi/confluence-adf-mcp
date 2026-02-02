@@ -35,23 +35,18 @@ Rotating refresh tokens are persisted to `.cache/confluence/.oauth_tokens.json` 
 
 See [Atlassian OAuth 2.0 (3LO) documentation](https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/) for how to create an OAuth app and obtain the initial refresh token.
 
-### Install and run
-
-```bash
-uv sync
-uv run server.py
-```
-
 ### Claude Code configuration
 
-Copy `.env.example` to `.env` and fill in your credentials, then add to `.claude/settings.json`:
+Copy `.env.example` to `.env` and fill in your credentials. The server loads `.env` automatically.
+
+Add to `.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "confluence-adf": {
-      "command": "uv",
-      "args": ["run", "--env-file", ".env", "--directory", "/path/to/confluence-adf-mcp", "server.py"]
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/karbassi/confluence-adf-mcp", "confluence-adf-mcp"]
     }
   }
 }
@@ -162,12 +157,6 @@ Copy `.env.example` to `.env` and fill in your credentials, then add to `.claude
 | `confluence_list_cache` | List locally cached pages |
 | `confluence_clear_cache` | Clear page cache |
 
-## Development
+## Contributing
 
-```bash
-# Install with test dependencies
-uv sync --extra test
-
-# Run tests
-uv run pytest tests/ -v
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).
