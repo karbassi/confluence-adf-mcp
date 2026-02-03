@@ -1,5 +1,7 @@
 # confluence-adf-mcp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 MCP server for reading and writing Confluence pages in native ADF (Atlassian Document Format).
 
 ## Setup
