@@ -374,9 +374,31 @@ def _extract_text_from_adf(node: dict | list, depth: int = 0) -> str:
 
     node_type = node.get("type", "")
 
-    # Leaf text node
+    # Leaf text node — apply marks for plaintext rendering
     if node_type == "text":
-        return node.get("text", "")
+        txt = node.get("text", "")
+        for mark in node.get("marks", []):
+            mt = mark.get("type", "")
+            if mt == "code":
+                txt = f"`{txt}`"
+            elif mt == "strong":
+                txt = f"**{txt}**"
+            elif mt == "em":
+                txt = f"*{txt}*"
+            elif mt == "strike":
+                txt = f"~~{txt}~~"
+            elif mt == "underline":
+                txt = f"__{txt}__"
+            elif mt == "link":
+                href = mark.get("attrs", {}).get("href", "")
+                txt = f"[{txt}]({href})"
+            elif mt == "subsup":
+                kind = mark.get("attrs", {}).get("type", "")
+                if kind == "sub":
+                    txt = f"_{txt}"
+                elif kind == "sup":
+                    txt = f"^{txt}"
+        return txt
 
     # Mention node
     if node_type == "mention":

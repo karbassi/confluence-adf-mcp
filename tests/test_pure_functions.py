@@ -348,6 +348,142 @@ class TestExtractTextFromAdf:
         assert "Intro" in result
         assert "- Bullet" in result
 
+    # -- Mark rendering --
+
+    def test_mark_code(self):
+        node = {"type": "text", "text": "foo", "marks": [{"type": "code"}]}
+        assert server._extract_text_from_adf(node) == "`foo`"
+
+    def test_mark_strong(self):
+        node = {"type": "text", "text": "bold", "marks": [{"type": "strong"}]}
+        assert server._extract_text_from_adf(node) == "**bold**"
+
+    def test_mark_em(self):
+        node = {"type": "text", "text": "italic", "marks": [{"type": "em"}]}
+        assert server._extract_text_from_adf(node) == "*italic*"
+
+    def test_mark_strike(self):
+        node = {"type": "text", "text": "removed", "marks": [{"type": "strike"}]}
+        assert server._extract_text_from_adf(node) == "~~removed~~"
+
+    def test_mark_underline(self):
+        node = {"type": "text", "text": "underlined", "marks": [{"type": "underline"}]}
+        assert server._extract_text_from_adf(node) == "__underlined__"
+
+    def test_mark_link(self):
+        node = {
+            "type": "text",
+            "text": "click",
+            "marks": [{"type": "link", "attrs": {"href": "https://example.com"}}],
+        }
+        assert server._extract_text_from_adf(node) == "[click](https://example.com)"
+
+    def test_mark_subsup_sub(self):
+        node = {
+            "type": "text",
+            "text": "2",
+            "marks": [{"type": "subsup", "attrs": {"type": "sub"}}],
+        }
+        assert server._extract_text_from_adf(node) == "_2"
+
+    def test_mark_subsup_sup(self):
+        node = {
+            "type": "text",
+            "text": "2",
+            "marks": [{"type": "subsup", "attrs": {"type": "sup"}}],
+        }
+        assert server._extract_text_from_adf(node) == "^2"
+
+    def test_mark_text_color_passthrough(self):
+        """textColor and border marks don't alter the text."""
+        node = {
+            "type": "text",
+            "text": "colored",
+            "marks": [{"type": "textColor", "attrs": {"color": "#ff0000"}}],
+        }
+        assert server._extract_text_from_adf(node) == "colored"
+
+    def test_mark_border_passthrough(self):
+        node = {
+            "type": "text",
+            "text": "bordered",
+            "marks": [{"type": "border", "attrs": {"size": 1, "color": "#000"}}],
+        }
+        assert server._extract_text_from_adf(node) == "bordered"
+
+    def test_multiple_marks(self):
+        """Multiple marks stack: bold + italic."""
+        node = {
+            "type": "text",
+            "text": "both",
+            "marks": [{"type": "strong"}, {"type": "em"}],
+        }
+        result = server._extract_text_from_adf(node)
+        assert "**" in result
+        assert "*" in result
+        assert "both" in result
+
+
+# ---------------------------------------------------------------------------
+# _apply_text_replace
+# ---------------------------------------------------------------------------
+
+
+class TestApplyTextReplace:
+    def test_simple_replace(self):
+        adf = make_adf([make_paragraph("hello world")])
+        count = server._apply_text_replace(adf, "hello", "goodbye", True)
+        assert count == 1
+        assert adf["content"][0]["content"][0]["text"] == "goodbye world"
+
+    def test_replace_all(self):
+        adf = make_adf([make_paragraph("aaa")])
+        count = server._apply_text_replace(adf, "a", "b", True)
+        assert count == 3
+        assert adf["content"][0]["content"][0]["text"] == "bbb"
+
+    def test_replace_first_only(self):
+        adf = make_adf([
+            make_paragraph("aaa"),
+            make_paragraph("aaa"),
+        ])
+        count = server._apply_text_replace(adf, "a", "b", False)
+        assert count == 1
+
+    def test_no_match(self):
+        adf = make_adf([make_paragraph("hello")])
+        count = server._apply_text_replace(adf, "xyz", "abc", True)
+        assert count == 0
+
+    def test_marks_preserved(self):
+        """Marks on text nodes survive replacement."""
+        adf = make_adf([{
+            "type": "paragraph",
+            "content": [{
+                "type": "text",
+                "text": "bold text",
+                "marks": [{"type": "strong"}],
+            }],
+        }])
+        server._apply_text_replace(adf, "bold", "strong", True)
+        text_node = adf["content"][0]["content"][0]
+        assert text_node["text"] == "strong text"
+        assert text_node["marks"] == [{"type": "strong"}]
+
+    def test_structural_nodes_untouched(self):
+        """Non-text nodes (mention, status, etc.) are not mutated."""
+        mention = {"type": "mention", "attrs": {"id": "123", "text": "@Alice"}}
+        adf = make_adf([{"type": "paragraph", "content": [mention]}])
+        count = server._apply_text_replace(adf, "Alice", "Bob", True)
+        assert count == 0
+        assert adf["content"][0]["content"][0]["attrs"]["text"] == "@Alice"
+
+    def test_nested_content(self):
+        """Replacement works inside nested structures like tables."""
+        adf = make_adf([make_table([["find me"]])])
+        count = server._apply_text_replace(adf, "find me", "found", True)
+        assert count == 1
+
 
 # ---------------------------------------------------------------------------
 # _get_table_nodes
