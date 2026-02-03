@@ -398,6 +398,19 @@ def _extract_text_from_adf(node: dict | list, depth: int = 0) -> str:
     if node_type == "status":
         return f"[{node.get('attrs', {}).get('text', '')}]"
 
+    # Date
+    if node_type == "date":
+        return node.get("attrs", {}).get("timestamp", "")
+
+    # Media nodes — extract filename or fallback to type placeholder
+    if node_type == "media":
+        alt = node.get("attrs", {}).get("alt", "")
+        return alt if alt else "[media]"
+
+    if node_type == "mediaInline":
+        alt = node.get("attrs", {}).get("alt", "")
+        return alt if alt else "[media]"
+
     content = node.get("content", [])
     inner = _extract_text_from_adf(content, depth)
 
@@ -452,11 +465,15 @@ def _extract_text_from_adf(node: dict | list, depth: int = 0) -> str:
         panel_type = node.get("attrs", {}).get("panelType", "info")
         return f"[{panel_type}] {inner}"
 
-    if node_type == "expand":
+    if node_type in ("expand", "nestedExpand"):
         title = node.get("attrs", {}).get("title", "")
         return f"▸ {title}\n{inner}" if title else inner
 
-    # Default: just return inner content
+    if node_type in ("mediaGroup", "mediaSingle"):
+        return inner + "\n"
+
+    # Default: just return inner content (covers doc, multiBodiedExtension,
+    # extensionFrame, and any future container nodes)
     return inner
 
 

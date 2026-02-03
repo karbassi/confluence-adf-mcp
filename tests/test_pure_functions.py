@@ -254,6 +254,78 @@ class TestExtractTextFromAdf:
         assert "Body" in result
         assert "▸" not in result
 
+    def test_nested_expand(self):
+        exp = {
+            "type": "nestedExpand",
+            "attrs": {"title": "Details"},
+            "content": [make_paragraph("Inner")],
+        }
+        result = server._extract_text_from_adf(exp)
+        assert "▸ Details" in result
+        assert "Inner" in result
+
+    def test_date(self):
+        node = {"type": "date", "attrs": {"timestamp": "1738540800000"}}
+        assert server._extract_text_from_adf(node) == "1738540800000"
+
+    def test_media_with_alt(self):
+        node = {"type": "media", "attrs": {"type": "file", "alt": "screenshot.png"}}
+        assert server._extract_text_from_adf(node) == "screenshot.png"
+
+    def test_media_without_alt(self):
+        node = {"type": "media", "attrs": {"type": "file", "id": "abc-123"}}
+        assert server._extract_text_from_adf(node) == "[media]"
+
+    def test_media_inline(self):
+        node = {"type": "mediaInline", "attrs": {"type": "file", "alt": "doc.pdf"}}
+        assert server._extract_text_from_adf(node) == "doc.pdf"
+
+    def test_media_inline_without_alt(self):
+        node = {"type": "mediaInline", "attrs": {"type": "file", "id": "xyz"}}
+        assert server._extract_text_from_adf(node) == "[media]"
+
+    def test_media_single(self):
+        node = {
+            "type": "mediaSingle",
+            "attrs": {"layout": "center"},
+            "content": [{"type": "media", "attrs": {"type": "file", "alt": "img.png"}}],
+        }
+        result = server._extract_text_from_adf(node)
+        assert "img.png" in result
+
+    def test_media_group(self):
+        node = {
+            "type": "mediaGroup",
+            "content": [
+                {"type": "media", "attrs": {"type": "file", "alt": "a.png"}},
+                {"type": "media", "attrs": {"type": "file", "alt": "b.png"}},
+            ],
+        }
+        result = server._extract_text_from_adf(node)
+        assert "a.png" in result
+        assert "b.png" in result
+
+    def test_multi_bodied_extension(self):
+        node = {
+            "type": "multiBodiedExtension",
+            "content": [
+                {
+                    "type": "extensionFrame",
+                    "content": [make_paragraph("Tab content")],
+                }
+            ],
+        }
+        result = server._extract_text_from_adf(node)
+        assert "Tab content" in result
+
+    def test_extension_frame(self):
+        node = {
+            "type": "extensionFrame",
+            "content": [make_paragraph("Frame body")],
+        }
+        result = server._extract_text_from_adf(node)
+        assert "Frame body" in result
+
     def test_list_input(self):
         nodes = [{"type": "text", "text": "A"}, {"type": "text", "text": "B"}]
         assert server._extract_text_from_adf(nodes) == "AB"
