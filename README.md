@@ -4,6 +4,10 @@
 
 MCP server for reading and writing Confluence pages in native ADF (Atlassian Document Format).
 
+## Why this exists
+
+Confluence stores pages in ADF (Atlassian Document Format), a structured JSON format. Most tools convert to/from HTML or plain text, losing structure, formatting, and metadata in the process. This MCP server works with ADF directly, so edits are precise — find/replace, table updates, and mention swaps happen at the document node level without corrupting the surrounding content.
+
 ## Setup
 
 ### Requirements
