@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Full ADF spec coverage — added `date`, `media`, `mediaInline`, `mediaGroup`, `mediaSingle`, `nestedExpand`, `multiBodiedExtension`, and `extensionFrame` node types to text extraction
+- Mark rendering in text extraction — `code`, `strong`, `em`, `strike`, `underline`, `link`, and `subsup` marks now render as markdown in plaintext output
+- Unit tests for `_apply_text_replace` (mark preservation, structural node safety, nested content)
+- `uvx` support via console entry point
+- Auto-loading `.env` via `python-dotenv` at startup
+- `.env.example` template for credentials
+- `CONTRIBUTING.md`, `LICENSE` (MIT), `SECURITY.md`
 - OAuth 2.0 (3LO) token refresh support alongside existing basic auth — auto-detected from environment variables, with proactive token refresh, rotating refresh token persistence, and 18 new tests
 - OAuth setup documentation in README with env vars, auto-detection, token file location, and MCP config examples
 - Friendly error wrapping — all tools return human-readable messages for HTTP errors (401, 403, 404, 429, 5xx) instead of raw tracebacks

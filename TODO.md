@@ -39,3 +39,6 @@ _No planned items._
 - [x] Redundancy removal refactor (extracted shared helpers, removed dead code)
 - [x] OAuth 2.0 (3LO) token refresh support with proactive refresh and rotating token persistence
 - [x] Post-OAuth hardening (file permissions, error sanitization, docs, tests)
+- [x] Full ADF spec audit — all node types and mark types implemented and tested (253 tests)
+- [x] `uvx` support, `.env` auto-loading, `.env.example`
+- [x] Open-source prep (LICENSE, CONTRIBUTING.md, SECURITY.md, secret scanning)
