@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp[cli]",
+    "mcp[cli]>=1.2,<2",
     "httpx",
 ]
 

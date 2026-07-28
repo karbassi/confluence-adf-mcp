@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Pinned `mcp[cli]` to `>=1.2,<2` — the MCP Python SDK 2.0 removed `mcp.server.fastmcp`, so an unpinned install resolved to 2.0.0 and crashed at import with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`
 - Token file permissions restricted to 0o600 (owner-only) to prevent credential exposure
 - OAuth error messages sanitized to exclude response body from token endpoint
 
