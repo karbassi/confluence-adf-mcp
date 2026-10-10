@@ -22,7 +22,26 @@ def _text(msg: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=msg)])
 
 CONFLUENCE_URL = os.environ["CONFLUENCE_URL"]
-CACHE_DIR = Path(os.environ.get("CACHE_DIR", ".cache/confluence"))
+
+
+def _resolve_cache_dir() -> Path:
+    """Return the absolute cache directory.
+
+    ``CACHE_DIR`` wins when set (made absolute against the startup cwd).
+    Otherwise use ``$XDG_CACHE_HOME/confluence-adf-mcp`` when that is an
+    absolute path, falling back to ``~/.cache/confluence-adf-mcp``. The
+    default never depends on the working directory, so every client of a
+    shared server sees the same location.
+    """
+    override = os.environ.get("CACHE_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".cache"
+    return base / "confluence-adf-mcp"
+
+
+CACHE_DIR = _resolve_cache_dir()
 
 BASE_URL = CONFLUENCE_URL.rstrip("/")
 

@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Default cache directory is now absolute — `$XDG_CACHE_HOME/confluence-adf-mcp` or `~/.cache/confluence-adf-mcp` — instead of the cwd-relative `.cache/confluence`. A relative `CACHE_DIR` is resolved against the startup directory. OAuth users relying on the old default should move `.cache/confluence/.oauth_tokens.json` into the new directory (or set `CACHE_DIR`) so the rotated refresh token is not lost
 - Destructive tools (archive, move) require `confirm=True` to execute
 - Extracted `_apply_text_replace` helper, eliminating duplicate `_replace_text` closures in `edit_page` and `find_replace`
 - Extracted `_find_attachment_by_title` helper, eliminating duplicate attachment lookup in `download_attachment` and `delete_attachment`

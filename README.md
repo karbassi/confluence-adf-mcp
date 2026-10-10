@@ -37,7 +37,7 @@ export CONFLUENCE_OAUTH_REFRESH_TOKEN="your-initial-refresh-token"
 
 If all three are set, the server uses OAuth automatically; otherwise it falls back to basic auth (`CONFLUENCE_USERNAME` / `CONFLUENCE_API_TOKEN`).
 
-Rotating refresh tokens are persisted to `.cache/confluence/.oauth_tokens.json` so the server can restart without re-authorizing.
+Rotating refresh tokens are persisted to `.oauth_tokens.json` in the cache directory so the server can restart without re-authorizing. The cache directory defaults to `$XDG_CACHE_HOME/confluence-adf-mcp` (or `~/.cache/confluence-adf-mcp`); set `CACHE_DIR` to override it.
 
 See [Atlassian OAuth 2.0 (3LO) documentation](https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/) for how to create an OAuth app and obtain the initial refresh token.
 
