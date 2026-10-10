@@ -78,7 +78,7 @@ class TestReadWriteCache:
 
     def test_read_missing_raises(self, tmp_cache):
         with pytest.raises(FileNotFoundError, match="No cached page"):
-            server._read_cache("nonexistent")
+            server._read_cache("999999")
 
     def test_write_returns_path(self, tmp_cache):
         result = server._write_cache("1", {"x": 1})

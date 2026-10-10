@@ -268,11 +268,33 @@ def _with_error_handling(func):
             return _text(_friendly_error(e))
         except FileNotFoundError as e:
             return _text(str(e))
+        except InvalidPageIdError as e:
+            return _text(str(e))
     return wrapper
 
 
+class InvalidPageIdError(ValueError):
+    """Raised when a page ID is not a plain ASCII number."""
+
+
+_PAGE_ID_RE = re.compile(r"[0-9]+", re.ASCII)
+
+
+def _validate_page_id(page_id: str) -> str:
+    """Return page_id if it is a plain ASCII-digit Confluence ID, else raise.
+
+    Page IDs become file names in the cache, so anything else (path
+    separators, ``..``, non-ASCII digits, NUL) is rejected outright.
+    """
+    if not isinstance(page_id, str) or not _PAGE_ID_RE.fullmatch(page_id):
+        raise InvalidPageIdError(
+            f"Invalid page ID {page_id!r}: expected a numeric Confluence page ID."
+        )
+    return page_id
+
+
 def _cache_path(page_id: str) -> Path:
-    return CACHE_DIR / f"{page_id}.json"
+    return CACHE_DIR / f"{_validate_page_id(page_id)}.json"
 
 
 def _read_cache(page_id: str) -> dict:
@@ -283,8 +305,8 @@ def _read_cache(page_id: str) -> dict:
 
 
 def _write_cache(page_id: str, data: dict) -> str:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _cache_path(page_id)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return str(path.resolve())
 
