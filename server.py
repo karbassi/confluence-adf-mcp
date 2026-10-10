@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 load_dotenv()
 from mcp.types import CallToolResult, TextContent
@@ -2695,5 +2696,68 @@ async def confluence_clear_cache(page_id: str = "") -> CallToolResult:
     return _text("Cache is already empty.")
 
 
+# --- Entry point ---
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_DEFAULT_HTTP_PORT = 8506
+
+
+def _csv_env(name: str) -> list[str]:
+    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+
+def _configure_http() -> None:
+    """Apply CONFLUENCE_ADF_MCP_* env to mcp.settings for streamable HTTP.
+
+    The endpoint has no authentication and holds an Atlassian token with
+    write access, so it only ever binds to loopback and always enforces the
+    SDK's Host/Origin (DNS-rebinding) checks.
+    """
+    host = os.environ.get("CONFLUENCE_ADF_MCP_HOST", "127.0.0.1")
+    if host not in _LOOPBACK_HOSTS:
+        raise SystemExit(
+            f"CONFLUENCE_ADF_MCP_HOST={host!r} refused: HTTP mode has no "
+            f"authentication, so it only binds to {', '.join(_LOOPBACK_HOSTS)}. "
+            "Put a reverse proxy with access control in front to reach it remotely."
+        )
+
+    raw_port = os.environ.get("CONFLUENCE_ADF_MCP_PORT", str(_DEFAULT_HTTP_PORT))
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"CONFLUENCE_ADF_MCP_PORT={raw_port!r} is not a valid TCP port.")
+
+    # FASTMCP_HOST/FASTMCP_PORT can't be used: the FastMCP constructor's
+    # host/port defaults override them, so set the settings directly.
+    mcp.settings.host = host
+    mcp.settings.port = port
+
+    authorities = [f"127.0.0.1:{port}", f"localhost:{port}"]
+    if host == "::1":
+        authorities.append(f"[::1]:{port}")
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=authorities + _csv_env("CONFLUENCE_ADF_MCP_ALLOWED_HOSTS"),
+        allowed_origins=[f"http://{a}" for a in authorities]
+        + _csv_env("CONFLUENCE_ADF_MCP_ALLOWED_ORIGINS"),
+    )
+
+
+def main() -> None:
+    """Console entry point: stdio by default, streamable HTTP when asked."""
+    transport = os.environ.get("CONFLUENCE_ADF_MCP_TRANSPORT", "stdio").strip().lower()
+    if transport == "stdio":
+        mcp.run("stdio")
+    elif transport in ("http", "streamable-http"):
+        _configure_http()
+        mcp.run("streamable-http")
+    else:
+        raise SystemExit(
+            f"CONFLUENCE_ADF_MCP_TRANSPORT={transport!r} not supported; use 'stdio' or 'http'."
+        )
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Optional shared streamable-HTTP transport: `CONFLUENCE_ADF_MCP_TRANSPORT=http` serves one long-lived server at `http://127.0.0.1:8506/mcp` (`CONFLUENCE_ADF_MCP_HOST` loopback only, `CONFLUENCE_ADF_MCP_PORT`), with DNS-rebinding protection always on and extra proxy hosts/origins via `CONFLUENCE_ADF_MCP_ALLOWED_HOSTS` / `CONFLUENCE_ADF_MCP_ALLOWED_ORIGINS`. The console script now points at `server:main`; stdio stays the default
 - Full ADF spec coverage — added `date`, `media`, `mediaInline`, `mediaGroup`, `mediaSingle`, `nestedExpand`, `multiBodiedExtension`, and `extensionFrame` node types to text extraction
 - Mark rendering in text extraction — `code`, `strong`, `em`, `strike`, `underline`, `link`, and `subsup` marks now render as markdown in plaintext output
 - Unit tests for `_apply_text_replace` (mark preservation, structural node safety, nested content)

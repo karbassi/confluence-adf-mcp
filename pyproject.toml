@@ -21,7 +21,7 @@ dependencies = [
 test = ["pytest>=8.0", "pytest-asyncio>=0.24", "respx>=0.22"]
 
 [project.scripts]
-confluence-adf-mcp = "server:mcp.run"
+confluence-adf-mcp = "server:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
