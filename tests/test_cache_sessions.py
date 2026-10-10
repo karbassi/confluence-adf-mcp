@@ -160,3 +160,84 @@ class TestIsolation:
         expected = tmp_cache / "sessions" / "http-aaa" / "12345.json"
         assert f"Cached at {expected}" in result.content[0].text
         assert expected.exists()
+
+
+class TestPruning:
+    def _make_ns(self, root, name, age_hours, now):
+        import os
+        d = root / "sessions" / name
+        d.mkdir(parents=True)
+        f = d / "1.json"
+        f.write_text("{}")
+        t = now - age_hours * 3600
+        os.utime(f, (t, t))
+        os.utime(d, (t, t))
+        return d
+
+    def test_prunes_only_stale_namespaces(self, tmp_cache):
+        import time
+        now = time.time()
+        old = self._make_ns(tmp_cache, "http-old", 24 * 8, now)
+        fresh = self._make_ns(tmp_cache, "http-fresh", 1, now)
+        removed = server._prune_stale_sessions(now=now, ttl_hours=24 * 7)
+        assert removed == 1
+        assert not old.exists()
+        assert fresh.exists()
+
+    def test_recent_file_keeps_old_dir(self, tmp_cache):
+        import os
+        import time
+        now = time.time()
+        d = self._make_ns(tmp_cache, "http-edited", 24 * 30, now)
+        os.utime(d / "1.json", (now, now))  # page edited in place just now
+        assert server._prune_stale_sessions(now=now, ttl_hours=24) == 0
+        assert d.exists()
+
+    def test_never_prunes_current_session(self, tmp_cache):
+        import time
+        now = time.time()
+        with as_session(_FakeSession(), "mine"):
+            d = self._make_ns(tmp_cache, "http-mine", 24 * 30, now)
+            assert server._prune_stale_sessions(now=now, ttl_hours=1) == 0
+        assert d.exists()
+
+    def test_ttl_zero_disables(self, tmp_cache):
+        import time
+        now = time.time()
+        d = self._make_ns(tmp_cache, "http-old", 24 * 30, now)
+        assert server._prune_stale_sessions(now=now, ttl_hours=0) == 0
+        assert d.exists()
+
+    def test_ignores_symlinks_and_files(self, tmp_cache, tmp_path):
+        import time
+        now = time.time()
+        (tmp_cache / "sessions").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.json").write_text("{}")
+        (tmp_cache / "sessions" / "http-link").symlink_to(outside)
+        (tmp_cache / "sessions" / "stray.txt").write_text("x")
+        import os
+        os.utime(tmp_cache / "sessions" / "stray.txt", (0, 0))
+        os.utime(outside / "keep.json", (0, 0))
+        server._prune_stale_sessions(now=now, ttl_hours=1)
+        assert (outside / "keep.json").exists()
+
+    def test_missing_sessions_dir_is_noop(self, tmp_cache):
+        assert server._prune_stale_sessions(ttl_hours=1) == 0
+
+    def test_ttl_from_env(self, monkeypatch):
+        monkeypatch.setenv("CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS", "12")
+        assert server._cache_ttl_hours() == 12
+        monkeypatch.setenv("CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS", "junk")
+        assert server._cache_ttl_hours() == server._DEFAULT_CACHE_TTL_HOURS
+        monkeypatch.delenv("CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS")
+        assert server._cache_ttl_hours() == 24 * 7
+
+    def test_write_cache_triggers_throttled_prune(self, tmp_cache, monkeypatch):
+        calls = []
+        monkeypatch.setattr(server, "_prune_stale_sessions", lambda **kw: calls.append(kw) or 0)
+        monkeypatch.setattr(server, "_last_prune", 0.0)
+        server._write_cache("1", {"x": 1})
+        server._write_cache("2", {"x": 2})
+        assert len(calls) == 1

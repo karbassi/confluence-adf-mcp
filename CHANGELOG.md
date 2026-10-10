@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Cached pages are namespaced per MCP session under `<cache dir>/sessions/<session>/`, so on a shared server one session's `get_page`/`edit_page`/`push_page`/`clear_cache` cannot read, overwrite, or clear another's working copies. `clear_cache` with no arguments clears only the caller's pages (and no longer deletes `.oauth_tokens.json`)
+- Cached pages are namespaced per MCP session under `<cache dir>/sessions/<session>/`, so on a shared server one session's `get_page`/`edit_page`/`push_page`/`clear_cache` cannot read, overwrite, or clear another's working copies. `clear_cache` with no arguments clears only the caller's pages (and no longer deletes `.oauth_tokens.json`). Session directories untouched for `CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS` (default 168) are pruned at startup and at most hourly
 - Default cache directory is now absolute — `$XDG_CACHE_HOME/confluence-adf-mcp` or `~/.cache/confluence-adf-mcp` — instead of the cwd-relative `.cache/confluence`. A relative `CACHE_DIR` is resolved against the startup directory. OAuth users relying on the old default should move `.cache/confluence/.oauth_tokens.json` into the new directory (or set `CACHE_DIR`) so the rotated refresh token is not lost
 - Destructive tools (archive, move) require `confirm=True` to execute
 - Extracted `_apply_text_replace` helper, eliminating duplicate `_replace_text` closures in `edit_page` and `find_replace`

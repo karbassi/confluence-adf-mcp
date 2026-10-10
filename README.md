@@ -95,7 +95,7 @@ File paths always refer to the filesystem of the machine **running the server**,
 - `confluence_get_page` returns the absolute path of the cached copy to edit. A remote client can't open it, so use the edit tools (`confluence_edit_page`, `confluence_find_replace`, ...) instead of editing the file directly.
 - `confluence_upload_attachment` reads, and `confluence_download_attachment` writes, paths on the server machine.
 
-Each MCP session gets its own page cache under `<cache dir>/sessions/<session>/`, so clients sharing one server can't see, overwrite, or clear each other's cached pages. If a client reconnects it gets a new session, so call `confluence_get_page` again before editing.
+Each MCP session gets its own page cache under `<cache dir>/sessions/<session>/`, so clients sharing one server can't see, overwrite, or clear each other's cached pages. If a client reconnects it gets a new session, so call `confluence_get_page` again before editing. Session directories untouched for `CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS` (default `168`, i.e. 7 days; `0` disables) are deleted at startup and at most hourly while the server runs.
 
 ## Tools
 

@@ -4,6 +4,7 @@ import functools
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 import weakref
@@ -337,6 +338,63 @@ def _session_cache_dir() -> Path:
     return CACHE_DIR / "sessions" / _session_namespace()
 
 
+# Session directories are never reachable again once their session ends
+# (reconnects get a new namespace), so prune any that have gone untouched
+# for longer than the TTL. Runs at startup and at most hourly on writes.
+_DEFAULT_CACHE_TTL_HOURS = 24 * 7
+_PRUNE_INTERVAL = 3600.0
+_last_prune = 0.0
+
+
+def _cache_ttl_hours() -> float:
+    raw = os.environ.get("CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_CACHE_TTL_HOURS
+    return value if value >= 0 else _DEFAULT_CACHE_TTL_HOURS
+
+
+def _prune_stale_sessions(now: float | None = None, ttl_hours: float | None = None) -> int:
+    """Delete session cache dirs not modified within the TTL. Returns count removed.
+
+    A directory counts as fresh if it or any file directly inside it was
+    modified within the TTL (pages edited in place only bump the file mtime).
+    The caller's own namespace, symlinks, and non-directories are never touched.
+    A TTL of 0 disables pruning.
+    """
+    ttl = _cache_ttl_hours() if ttl_hours is None else ttl_hours
+    root = CACHE_DIR / "sessions"
+    if ttl <= 0 or not root.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - ttl * 3600
+    current = _session_namespace()
+    removed = 0
+    for entry in root.iterdir():
+        if entry.name == current or entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            newest = max(
+                [entry.stat().st_mtime]
+                + [f.stat().st_mtime for f in entry.iterdir() if not f.is_symlink()]
+            )
+            if newest < cutoff:
+                shutil.rmtree(entry)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _maybe_prune_stale_sessions() -> None:
+    global _last_prune
+    now = time.time()
+    if now - _last_prune < _PRUNE_INTERVAL:
+        return
+    _last_prune = now
+    _prune_stale_sessions(now=now)
+
+
 def _cache_path(page_id: str) -> Path:
     return _session_cache_dir() / f"{_validate_page_id(page_id)}.json"
 
@@ -350,6 +408,7 @@ def _read_cache(page_id: str) -> dict:
 
 def _write_cache(page_id: str, data: dict) -> str:
     path = _cache_path(page_id)
+    _maybe_prune_stale_sessions()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return str(path.resolve())
@@ -2748,6 +2807,7 @@ def _configure_http() -> None:
 def main() -> None:
     """Console entry point: stdio by default, streamable HTTP when asked."""
     transport = os.environ.get("CONFLUENCE_ADF_MCP_TRANSPORT", "stdio").strip().lower()
+    _maybe_prune_stale_sessions()
     if transport == "stdio":
         mcp.run("stdio")
     elif transport in ("http", "streamable-http"):

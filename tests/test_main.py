@@ -14,7 +14,7 @@ ENV_VARS = (
 
 
 @pytest.fixture
-def run_calls(monkeypatch):
+def run_calls(monkeypatch, tmp_cache):
     calls = []
     monkeypatch.setattr(server.mcp, "run", lambda *a, **kw: calls.append((a, kw)))
     for var in ENV_VARS:
@@ -115,3 +115,11 @@ def test_console_script_points_at_main():
 
     pyproject = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
     assert pyproject["project"]["scripts"]["confluence-adf-mcp"] == "server:main"
+
+
+def test_main_prunes_stale_sessions_at_startup(monkeypatch, run_calls):
+    pruned = []
+    monkeypatch.setattr(server, "_prune_stale_sessions", lambda **kw: pruned.append(kw) or 0)
+    monkeypatch.setattr(server, "_last_prune", 0.0)
+    server.main()
+    assert len(pruned) == 1
