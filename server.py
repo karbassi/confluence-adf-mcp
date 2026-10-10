@@ -5,6 +5,8 @@ import json
 import os
 import re
 import time
+import uuid
+import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -293,8 +295,49 @@ def _validate_page_id(page_id: str) -> str:
     return page_id
 
 
+# --- Per-session cache namespaces ---
+# One HTTP server may serve many MCP sessions at once. Cached pages are the
+# working copies that get_page/edit_page/push_page operate on, so each
+# session gets its own directory under CACHE_DIR/sessions/ and can never
+# read, overwrite, or clear another session's copies.
+
+_PROCESS_NAMESPACE = f"proc-{uuid.uuid4().hex}"
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII)
+_session_namespaces: "weakref.WeakKeyDictionary[object, str]" = weakref.WeakKeyDictionary()
+
+
+def _session_namespace() -> str:
+    """Return a filesystem-safe cache namespace for the calling MCP session.
+
+    - Streamable HTTP: the ``mcp-session-id`` the SDK assigned this session.
+    - Any other request (stdio, or HTTP without a usable session ID): a random
+      ID tied to the ServerSession object, so each connection is still isolated.
+    - Outside a request (direct calls): one namespace for this process.
+    """
+    try:
+        ctx = mcp._mcp_server.request_context
+    except LookupError:
+        return _PROCESS_NAMESPACE
+    headers = getattr(getattr(ctx, "request", None), "headers", None)
+    session_id = headers.get("mcp-session-id") if headers is not None else None
+    if session_id and _SESSION_ID_RE.fullmatch(session_id):
+        return f"http-{session_id}"
+    session = ctx.session
+    try:
+        ns = _session_namespaces.get(session)
+        if ns is None:
+            ns = _session_namespaces[session] = f"session-{uuid.uuid4().hex}"
+        return ns
+    except TypeError:  # session object not weak-referenceable
+        return _PROCESS_NAMESPACE
+
+
+def _session_cache_dir() -> Path:
+    return CACHE_DIR / "sessions" / _session_namespace()
+
+
 def _cache_path(page_id: str) -> Path:
-    return CACHE_DIR / f"{_validate_page_id(page_id)}.json"
+    return _session_cache_dir() / f"{_validate_page_id(page_id)}.json"
 
 
 def _read_cache(page_id: str) -> dict:
@@ -306,7 +349,7 @@ def _read_cache(page_id: str) -> dict:
 
 def _write_cache(page_id: str, data: dict) -> str:
     path = _cache_path(page_id)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return str(path.resolve())
 
@@ -658,8 +701,9 @@ async def _get_page_version_adf(client: httpx.AsyncClient, page_id: str, version
 async def confluence_get_page(page_id: str) -> CallToolResult:
     """Fetch a Confluence page and cache it locally for editing.
 
-    Returns the page metadata and the local cache file path. Edit the cached file
-    directly, then call confluence_push_page to publish your changes.
+    Returns the page metadata and the absolute cache file path (on the machine
+    running this server; the path is specific to this MCP session). Edit the
+    cached file directly, then call confluence_push_page to publish your changes.
 
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
@@ -2603,13 +2647,15 @@ async def confluence_get_user(
 @mcp.tool()
 @_with_error_handling
 async def confluence_list_cache() -> CallToolResult:
-    """List all locally cached Confluence pages.
+    """List Confluence pages cached by this MCP session.
 
-    Shows page IDs, titles, and when they were last cached.
+    Shows page IDs, titles, and when they were last cached. Each session has
+    its own cache, so pages cached by other clients are not shown.
     """
-    if not CACHE_DIR.exists():
+    cache_dir = _session_cache_dir()
+    if not cache_dir.exists():
         return _text("Cache is empty.")
-    files = sorted(CACHE_DIR.glob("*.json"))
+    files = sorted(cache_dir.glob("*.json"))
     if not files:
         return _text("Cache is empty.")
     lines = [f"{len(files)} cached page(s):"]
@@ -2627,8 +2673,8 @@ async def confluence_list_cache() -> CallToolResult:
 async def confluence_clear_cache(page_id: str = "") -> CallToolResult:
     """Clear the local page cache.
 
-    Removes cached page data. Pass a page_id to clear a specific page,
-    or omit it to clear all cached pages.
+    Removes cached page data for this MCP session only. Pass a page_id to
+    clear a specific page, or omit it to clear all of this session's pages.
 
     Args:
         page_id: Optional page ID to clear. Empty clears all cached pages.
@@ -2639,9 +2685,10 @@ async def confluence_clear_cache(page_id: str = "") -> CallToolResult:
             path.unlink()
             return _text(f"Cleared cache for page {page_id}.")
         return _text(f"No cache found for page {page_id}.")
-    if CACHE_DIR.exists():
+    cache_dir = _session_cache_dir()
+    if cache_dir.exists():
         count = 0
-        for f in CACHE_DIR.glob("*.json"):
+        for f in cache_dir.glob("*.json"):
             f.unlink()
             count += 1
         return _text(f"Cleared {count} cached page(s).")

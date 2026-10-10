@@ -57,7 +57,8 @@ class TestCachePath:
     def test_returns_correct_format(self, tmp_cache):
         path = server._cache_path("12345")
         assert path.name == "12345.json"
-        assert path.parent == tmp_cache
+        assert path.parent == server._session_cache_dir()
+        assert path.parent.parent == tmp_cache / "sessions"
 
     def test_different_ids(self, tmp_cache):
         p1 = server._cache_path("111")

@@ -26,7 +26,7 @@ class TestGetPage:
         )
         result = await server.confluence_get_page("12345")
         assert "Test Page" in result.content[0].text
-        assert (tmp_cache / "12345.json").exists()
+        assert server._cache_path("12345").exists()
 
     @respx.mock
     async def test_url_resolve(self, tmp_cache):
@@ -44,7 +44,7 @@ class TestGetPage:
             return_value=httpx.Response(200, json=page)
         )
         await server.confluence_get_page("12345")
-        cached = json.loads((tmp_cache / "12345.json").read_text())
+        cached = json.loads(server._cache_path("12345").read_text())
         assert cached["id"] == "12345"
         assert cached["title"] == "Test Page"
         assert cached["version"] == 1
@@ -606,7 +606,7 @@ class TestClearCache:
         server._write_cache("1", {"id": "1", "title": "T", "version": 1, "adf": {}})
         result = await server.confluence_clear_cache("1")
         assert "Cleared cache for page 1" in result.content[0].text
-        assert not (tmp_cache / "1.json").exists()
+        assert not server._cache_path("1").exists()
 
     async def test_clear_all(self, tmp_cache):
         server._write_cache("1", {"id": "1", "title": "T", "version": 1, "adf": {}})
