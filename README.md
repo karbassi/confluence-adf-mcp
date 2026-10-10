@@ -58,6 +58,45 @@ Add to `.claude/settings.json`:
 }
 ```
 
+## Shared HTTP server
+
+By default every client starts its own stdio process. To run one long-lived server that many clients share:
+
+```bash
+CONFLUENCE_ADF_MCP_TRANSPORT=http CONFLUENCE_ADF_MCP_PORT=8506 confluence-adf-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "confluence-adf": { "type": "http", "url": "http://127.0.0.1:8506/mcp" }
+  }
+}
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONFLUENCE_ADF_MCP_TRANSPORT` | `stdio` | `stdio` or `http` (streamable HTTP at `/mcp`) |
+| `CONFLUENCE_ADF_MCP_HOST` | `127.0.0.1` | Bind address. Only `127.0.0.1`, `localhost`, or `::1`; anything else exits |
+| `CONFLUENCE_ADF_MCP_PORT` | `8506` | TCP port |
+| `CONFLUENCE_ADF_MCP_ALLOWED_HOSTS` | | Extra comma-separated `Host` header values to accept, e.g. a reverse proxy's `mcp.example.com` |
+| `CONFLUENCE_ADF_MCP_ALLOWED_ORIGINS` | | Extra comma-separated `Origin` values to accept, e.g. `https://mcp.example.com` |
+
+`FASTMCP_HOST` / `FASTMCP_PORT` have no effect; use the variables above.
+
+The endpoint has **no authentication**. It holds your Atlassian credentials, and its tools can edit, move, archive, and restrict pages and delete attachments. Anything that can connect to it acts as you. So:
+
+- The server only binds to loopback. Any local process can still connect, so only use HTTP mode on a machine where every local user and process is trusted with your Atlassian account.
+- DNS-rebinding protection is always on: requests whose `Host` is not `127.0.0.1:<port>`, `localhost:<port>` (or an entry in `CONFLUENCE_ADF_MCP_ALLOWED_HOSTS`) are rejected with `421`, and cross-site `Origin`s with `403`. That check **only** stops web pages from reaching the server through a rebound DNS name. It does not authenticate anyone.
+- To reach it from another machine, put it behind a reverse proxy that **controls who can connect** (bearer token, mTLS, an IP allowlist on a private network, or similar) and add the proxy's hostname to `CONFLUENCE_ADF_MCP_ALLOWED_HOSTS`. Never expose the port or the proxy publicly without access control.
+
+File paths always refer to the filesystem of the machine **running the server**, not the client's:
+
+- `confluence_get_page` returns the absolute path of the cached copy to edit. A remote client can't open it, so use the edit tools (`confluence_edit_page`, `confluence_find_replace`, ...) instead of editing the file directly.
+- `confluence_upload_attachment` reads, and `confluence_download_attachment` writes, paths on the server machine.
+
+Each MCP session gets its own page cache under `<cache dir>/sessions/<session>/`, so clients sharing one server can't see, overwrite, or clear each other's cached pages. If a client reconnects it gets a new session, so call `confluence_get_page` again before editing.
+
 ## Tools
 
 ### Pages
