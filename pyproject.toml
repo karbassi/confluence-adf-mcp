@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp[cli]>=1.2,<2",
+    "mcp[cli]>=1.26,<2",
     "httpx",
 ]
 
@@ -21,7 +21,7 @@ dependencies = [
 test = ["pytest>=8.0", "pytest-asyncio>=0.24", "respx>=0.22"]
 
 [project.scripts]
-confluence-adf-mcp = "server:mcp.run"
+confluence-adf-mcp = "server:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

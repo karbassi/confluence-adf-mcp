@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Optional shared streamable-HTTP transport: `CONFLUENCE_ADF_MCP_TRANSPORT=http` serves one long-lived server at `http://127.0.0.1:8506/mcp` (`CONFLUENCE_ADF_MCP_HOST` loopback only, `CONFLUENCE_ADF_MCP_PORT`), with DNS-rebinding protection always on and extra proxy hosts/origins via `CONFLUENCE_ADF_MCP_ALLOWED_HOSTS` / `CONFLUENCE_ADF_MCP_ALLOWED_ORIGINS`. The console script now points at `server:main`; stdio stays the default
 - Full ADF spec coverage — added `date`, `media`, `mediaInline`, `mediaGroup`, `mediaSingle`, `nestedExpand`, `multiBodiedExtension`, and `extensionFrame` node types to text extraction
 - Mark rendering in text extraction — `code`, `strong`, `em`, `strike`, `underline`, `link`, and `subsup` marks now render as markdown in plaintext output
 - Unit tests for `_apply_text_replace` (mark preservation, structural node safety, nested content)
@@ -41,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Cached pages are namespaced per MCP session under `<cache dir>/sessions/<session>/`, so on a shared server one session's `get_page`/`edit_page`/`push_page`/`clear_cache` cannot read, overwrite, or clear another's working copies. `clear_cache` with no arguments clears only the caller's pages (and no longer deletes `.oauth_tokens.json`). Session directories untouched for `CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS` (default 168) are pruned at startup and at most hourly
+- Default cache directory is now absolute — `$XDG_CACHE_HOME/confluence-adf-mcp` or `~/.cache/confluence-adf-mcp` — instead of the cwd-relative `.cache/confluence`. A relative `CACHE_DIR` is resolved against the startup directory. OAuth users relying on the old default should move `.cache/confluence/.oauth_tokens.json` into the new directory (or set `CACHE_DIR`) so the rotated refresh token is not lost
 - Destructive tools (archive, move) require `confirm=True` to execute
 - Extracted `_apply_text_replace` helper, eliminating duplicate `_replace_text` closures in `edit_page` and `find_replace`
 - Extracted `_find_attachment_by_title` helper, eliminating duplicate attachment lookup in `download_attachment` and `delete_attachment`
@@ -53,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Pinned `mcp[cli]` to `>=1.2,<2` — the MCP Python SDK 2.0 removed `mcp.server.fastmcp`, so an unpinned install resolved to 2.0.0 and crashed at import with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`
+- Page IDs are validated as plain ASCII digits before they are used as cache file names, so a crafted `page_id` (e.g. `../x`) can no longer read, write, or delete files outside the cache directory
+- Pinned `mcp[cli]` to `>=1.26,<2` (1.26 is the tested floor for the HTTP transport-security settings) — the MCP Python SDK 2.0 removed `mcp.server.fastmcp`, so an unpinned install resolved to 2.0.0 and crashed at import with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`
 - Token file permissions restricted to 0o600 (owner-only) to prevent credential exposure
 - OAuth error messages sanitized to exclude response body from token endpoint
 

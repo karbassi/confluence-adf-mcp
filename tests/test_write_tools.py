@@ -96,8 +96,8 @@ class TestPushPage:
         assert cached["version"] == 2
 
     async def test_missing_cache(self, tmp_cache):
-        result = await server.confluence_push_page("nonexistent")
-        assert "No cached page for nonexistent" in result.content[0].text
+        result = await server.confluence_push_page("999999")
+        assert "No cached page for 999999" in result.content[0].text
 
     @respx.mock
     async def test_api_error(self, tmp_cache):

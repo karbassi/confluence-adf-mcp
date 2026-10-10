@@ -57,7 +57,8 @@ class TestCachePath:
     def test_returns_correct_format(self, tmp_cache):
         path = server._cache_path("12345")
         assert path.name == "12345.json"
-        assert path.parent == tmp_cache
+        assert path.parent == server._session_cache_dir()
+        assert path.parent.parent == tmp_cache / "sessions"
 
     def test_different_ids(self, tmp_cache):
         p1 = server._cache_path("111")
@@ -78,7 +79,7 @@ class TestReadWriteCache:
 
     def test_read_missing_raises(self, tmp_cache):
         with pytest.raises(FileNotFoundError, match="No cached page"):
-            server._read_cache("nonexistent")
+            server._read_cache("999999")
 
     def test_write_returns_path(self, tmp_cache):
         result = server._write_cache("1", {"x": 1})

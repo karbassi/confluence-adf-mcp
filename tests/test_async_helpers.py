@@ -242,9 +242,9 @@ class TestWithErrorHandling:
         assert "server error" in text
 
     async def test_file_not_found(self, tmp_cache):
-        result = await server.confluence_push_page("nonexistent")
+        result = await server.confluence_push_page("999999")
         text = result.content[0].text
-        assert "No cached page for nonexistent" in text
+        assert "No cached page for 999999" in text
 
 
 # ---------------------------------------------------------------------------

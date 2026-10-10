@@ -4,13 +4,17 @@ import functools
 import json
 import os
 import re
+import shutil
 import time
+import uuid
+import weakref
 from datetime import datetime
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 load_dotenv()
 from mcp.types import CallToolResult, TextContent
@@ -22,7 +26,26 @@ def _text(msg: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=msg)])
 
 CONFLUENCE_URL = os.environ["CONFLUENCE_URL"]
-CACHE_DIR = Path(os.environ.get("CACHE_DIR", ".cache/confluence"))
+
+
+def _resolve_cache_dir() -> Path:
+    """Return the absolute cache directory.
+
+    ``CACHE_DIR`` wins when set (made absolute against the startup cwd).
+    Otherwise use ``$XDG_CACHE_HOME/confluence-adf-mcp`` when that is an
+    absolute path, falling back to ``~/.cache/confluence-adf-mcp``. The
+    default never depends on the working directory, so every client of a
+    shared server sees the same location.
+    """
+    override = os.environ.get("CACHE_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".cache"
+    return base / "confluence-adf-mcp"
+
+
+CACHE_DIR = _resolve_cache_dir()
 
 BASE_URL = CONFLUENCE_URL.rstrip("/")
 
@@ -249,11 +272,131 @@ def _with_error_handling(func):
             return _text(_friendly_error(e))
         except FileNotFoundError as e:
             return _text(str(e))
+        except InvalidPageIdError as e:
+            return _text(str(e))
     return wrapper
 
 
+class InvalidPageIdError(ValueError):
+    """Raised when a page ID is not a plain ASCII number."""
+
+
+_PAGE_ID_RE = re.compile(r"[0-9]+", re.ASCII)
+
+
+def _validate_page_id(page_id: str) -> str:
+    """Return page_id if it is a plain ASCII-digit Confluence ID, else raise.
+
+    Page IDs become file names in the cache, so anything else (path
+    separators, ``..``, non-ASCII digits, NUL) is rejected outright.
+    """
+    if not isinstance(page_id, str) or not _PAGE_ID_RE.fullmatch(page_id):
+        raise InvalidPageIdError(
+            f"Invalid page ID {page_id!r}: expected a numeric Confluence page ID."
+        )
+    return page_id
+
+
+# --- Per-session cache namespaces ---
+# One HTTP server may serve many MCP sessions at once. Cached pages are the
+# working copies that get_page/edit_page/push_page operate on, so each
+# session gets its own directory under CACHE_DIR/sessions/ and can never
+# read, overwrite, or clear another session's copies.
+
+_PROCESS_NAMESPACE = f"proc-{uuid.uuid4().hex}"
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII)
+_session_namespaces: "weakref.WeakKeyDictionary[object, str]" = weakref.WeakKeyDictionary()
+
+
+def _session_namespace() -> str:
+    """Return a filesystem-safe cache namespace for the calling MCP session.
+
+    - Streamable HTTP: the ``mcp-session-id`` the SDK assigned this session.
+    - Any other request (stdio, or HTTP without a usable session ID): a random
+      ID tied to the ServerSession object, so each connection is still isolated.
+    - Outside a request (direct calls): one namespace for this process.
+    """
+    try:
+        ctx = mcp._mcp_server.request_context
+    except LookupError:
+        return _PROCESS_NAMESPACE
+    headers = getattr(getattr(ctx, "request", None), "headers", None)
+    session_id = headers.get("mcp-session-id") if headers is not None else None
+    if session_id and _SESSION_ID_RE.fullmatch(session_id):
+        return f"http-{session_id}"
+    session = ctx.session
+    try:
+        ns = _session_namespaces.get(session)
+        if ns is None:
+            ns = _session_namespaces[session] = f"session-{uuid.uuid4().hex}"
+        return ns
+    except TypeError:  # session object not weak-referenceable
+        return _PROCESS_NAMESPACE
+
+
+def _session_cache_dir() -> Path:
+    return CACHE_DIR / "sessions" / _session_namespace()
+
+
+# Session directories are never reachable again once their session ends
+# (reconnects get a new namespace), so prune any that have gone untouched
+# for longer than the TTL. Runs at startup and at most hourly on writes.
+_DEFAULT_CACHE_TTL_HOURS = 24 * 7
+_PRUNE_INTERVAL = 3600.0
+_last_prune = 0.0
+
+
+def _cache_ttl_hours() -> float:
+    raw = os.environ.get("CONFLUENCE_ADF_MCP_CACHE_TTL_HOURS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_CACHE_TTL_HOURS
+    return value if value >= 0 else _DEFAULT_CACHE_TTL_HOURS
+
+
+def _prune_stale_sessions(now: float | None = None, ttl_hours: float | None = None) -> int:
+    """Delete session cache dirs not modified within the TTL. Returns count removed.
+
+    A directory counts as fresh if it or any file directly inside it was
+    modified within the TTL (pages edited in place only bump the file mtime).
+    The caller's own namespace, symlinks, and non-directories are never touched.
+    A TTL of 0 disables pruning.
+    """
+    ttl = _cache_ttl_hours() if ttl_hours is None else ttl_hours
+    root = CACHE_DIR / "sessions"
+    if ttl <= 0 or not root.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - ttl * 3600
+    current = _session_namespace()
+    removed = 0
+    for entry in root.iterdir():
+        if entry.name == current or entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            newest = max(
+                [entry.stat().st_mtime]
+                + [f.stat().st_mtime for f in entry.iterdir() if not f.is_symlink()]
+            )
+            if newest < cutoff:
+                shutil.rmtree(entry)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _maybe_prune_stale_sessions() -> None:
+    global _last_prune
+    now = time.time()
+    if now - _last_prune < _PRUNE_INTERVAL:
+        return
+    _last_prune = now
+    _prune_stale_sessions(now=now)
+
+
 def _cache_path(page_id: str) -> Path:
-    return CACHE_DIR / f"{page_id}.json"
+    return _session_cache_dir() / f"{_validate_page_id(page_id)}.json"
 
 
 def _read_cache(page_id: str) -> dict:
@@ -264,8 +407,9 @@ def _read_cache(page_id: str) -> dict:
 
 
 def _write_cache(page_id: str, data: dict) -> str:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _cache_path(page_id)
+    _maybe_prune_stale_sessions()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return str(path.resolve())
 
@@ -617,8 +761,9 @@ async def _get_page_version_adf(client: httpx.AsyncClient, page_id: str, version
 async def confluence_get_page(page_id: str) -> CallToolResult:
     """Fetch a Confluence page and cache it locally for editing.
 
-    Returns the page metadata and the local cache file path. Edit the cached file
-    directly, then call confluence_push_page to publish your changes.
+    Returns the page metadata and the absolute cache file path (on the machine
+    running this server; the path is specific to this MCP session). Edit the
+    cached file directly, then call confluence_push_page to publish your changes.
 
     Args:
         page_id: A numeric page ID or a Confluence URL (including short /wiki/x/ links).
@@ -2562,13 +2707,15 @@ async def confluence_get_user(
 @mcp.tool()
 @_with_error_handling
 async def confluence_list_cache() -> CallToolResult:
-    """List all locally cached Confluence pages.
+    """List Confluence pages cached by this MCP session.
 
-    Shows page IDs, titles, and when they were last cached.
+    Shows page IDs, titles, and when they were last cached. Each session has
+    its own cache, so pages cached by other clients are not shown.
     """
-    if not CACHE_DIR.exists():
+    cache_dir = _session_cache_dir()
+    if not cache_dir.exists():
         return _text("Cache is empty.")
-    files = sorted(CACHE_DIR.glob("*.json"))
+    files = sorted(cache_dir.glob("*.json"))
     if not files:
         return _text("Cache is empty.")
     lines = [f"{len(files)} cached page(s):"]
@@ -2586,8 +2733,8 @@ async def confluence_list_cache() -> CallToolResult:
 async def confluence_clear_cache(page_id: str = "") -> CallToolResult:
     """Clear the local page cache.
 
-    Removes cached page data. Pass a page_id to clear a specific page,
-    or omit it to clear all cached pages.
+    Removes cached page data for this MCP session only. Pass a page_id to
+    clear a specific page, or omit it to clear all of this session's pages.
 
     Args:
         page_id: Optional page ID to clear. Empty clears all cached pages.
@@ -2598,14 +2745,79 @@ async def confluence_clear_cache(page_id: str = "") -> CallToolResult:
             path.unlink()
             return _text(f"Cleared cache for page {page_id}.")
         return _text(f"No cache found for page {page_id}.")
-    if CACHE_DIR.exists():
+    cache_dir = _session_cache_dir()
+    if cache_dir.exists():
         count = 0
-        for f in CACHE_DIR.glob("*.json"):
+        for f in cache_dir.glob("*.json"):
             f.unlink()
             count += 1
         return _text(f"Cleared {count} cached page(s).")
     return _text("Cache is already empty.")
 
 
+# --- Entry point ---
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_DEFAULT_HTTP_PORT = 8506
+
+
+def _csv_env(name: str) -> list[str]:
+    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+
+def _configure_http() -> None:
+    """Apply CONFLUENCE_ADF_MCP_* env to mcp.settings for streamable HTTP.
+
+    The endpoint has no authentication and holds an Atlassian token with
+    write access, so it only ever binds to loopback and always enforces the
+    SDK's Host/Origin (DNS-rebinding) checks.
+    """
+    host = os.environ.get("CONFLUENCE_ADF_MCP_HOST", "127.0.0.1")
+    if host not in _LOOPBACK_HOSTS:
+        raise SystemExit(
+            f"CONFLUENCE_ADF_MCP_HOST={host!r} refused: HTTP mode has no "
+            f"authentication, so it only binds to {', '.join(_LOOPBACK_HOSTS)}. "
+            "Put a reverse proxy with access control in front to reach it remotely."
+        )
+
+    raw_port = os.environ.get("CONFLUENCE_ADF_MCP_PORT", str(_DEFAULT_HTTP_PORT))
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"CONFLUENCE_ADF_MCP_PORT={raw_port!r} is not a valid TCP port.")
+
+    # FASTMCP_HOST/FASTMCP_PORT can't be used: the FastMCP constructor's
+    # host/port defaults override them, so set the settings directly.
+    mcp.settings.host = host
+    mcp.settings.port = port
+
+    authorities = [f"127.0.0.1:{port}", f"localhost:{port}"]
+    if host == "::1":
+        authorities.append(f"[::1]:{port}")
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=authorities + _csv_env("CONFLUENCE_ADF_MCP_ALLOWED_HOSTS"),
+        allowed_origins=[f"http://{a}" for a in authorities]
+        + _csv_env("CONFLUENCE_ADF_MCP_ALLOWED_ORIGINS"),
+    )
+
+
+def main() -> None:
+    """Console entry point: stdio by default, streamable HTTP when asked."""
+    transport = os.environ.get("CONFLUENCE_ADF_MCP_TRANSPORT", "stdio").strip().lower()
+    _maybe_prune_stale_sessions()
+    if transport == "stdio":
+        mcp.run("stdio")
+    elif transport in ("http", "streamable-http"):
+        _configure_http()
+        mcp.run("streamable-http")
+    else:
+        raise SystemExit(
+            f"CONFLUENCE_ADF_MCP_TRANSPORT={transport!r} not supported; use 'stdio' or 'http'."
+        )
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
